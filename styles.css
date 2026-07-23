@@ -1,0 +1,139 @@
+/* md-annotation — static styles. Per-format colors arrive as inline CSS
+   custom properties (validated hex only) on each highlight span/decoration;
+   the rules below pick the pair matching the active theme. */
+
+.mdann-hl {
+	border-radius: 2px;
+	color: var(--mdann-light-fg, inherit);
+	background-color: var(--mdann-light-bg, transparent);
+}
+
+body.theme-dark .mdann-hl {
+	color: var(--mdann-dark-fg, inherit);
+	background-color: var(--mdann-dark-bg, transparent);
+}
+
+/* ── Sidebar ─────────────────────────────────────────────────────────── */
+
+.mdann-sidebar {
+	padding: var(--size-4-2);
+}
+
+.mdann-file-title {
+	font-weight: var(--font-bold);
+	margin-bottom: var(--size-4-2);
+}
+
+.mdann-section {
+	font-size: var(--font-ui-small);
+	font-weight: var(--font-bold);
+	color: var(--text-muted);
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	margin: var(--size-4-3) 0 var(--size-4-1) 0;
+}
+
+.mdann-empty,
+.mdann-hint {
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
+
+.mdann-card {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	padding: var(--size-4-2);
+	margin-bottom: var(--size-4-2);
+	background: var(--background-primary);
+}
+
+.mdann-card-orphan {
+	border-color: var(--text-error);
+}
+
+.mdann-quote {
+	margin-bottom: var(--size-4-1);
+	line-height: 1.4;
+	word-break: break-word;
+}
+
+.mdann-quote-clickable {
+	cursor: pointer;
+}
+
+.mdann-orphan-reason {
+	color: var(--text-error);
+	font-size: var(--font-ui-small);
+	margin-bottom: var(--size-4-1);
+}
+
+.mdann-comment-input {
+	width: 100%;
+	resize: vertical;
+	font-size: var(--font-ui-small);
+	margin-bottom: var(--size-4-1);
+}
+
+.mdann-meta {
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+	margin-bottom: var(--size-4-1);
+}
+
+.mdann-buttons {
+	display: flex;
+	gap: var(--size-4-1);
+	flex-wrap: wrap;
+}
+
+.mdann-buttons button {
+	font-size: var(--font-ui-small);
+}
+
+.mdann-raw-line {
+	display: block;
+	overflow-x: auto;
+	white-space: pre;
+	font-size: var(--font-ui-smaller);
+	margin-bottom: var(--size-4-1);
+}
+
+/* ── Settings ────────────────────────────────────────────────────────── */
+
+.mdann-format-row .setting-item-control {
+	flex-wrap: wrap;
+	justify-content: flex-start;
+}
+
+.mdann-color-grid {
+	display: flex;
+	gap: var(--size-4-2);
+	flex-wrap: wrap;
+}
+
+.mdann-color-cell {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+}
+
+.mdann-color-label {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+
+.mdann-color-picker {
+	width: 28px;
+	height: 22px;
+	padding: 0;
+}
+
+.mdann-color-hex {
+	width: 5.2em;
+	font-size: var(--font-ui-smaller);
+}
+
+.mdann-color-clear {
+	padding: 0 6px;
+	font-size: var(--font-ui-smaller);
+}
