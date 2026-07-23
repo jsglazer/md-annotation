@@ -6,6 +6,7 @@ import {
 	parseDocument,
 	removeAnnotation,
 	removeUnparseableLine,
+	renameAnnotationFormat,
 	serializeAnnotationLine,
 	updateAnnotation,
 	upsertAnnotation,
@@ -191,5 +192,32 @@ describe('document edit helpers never touch the body', () => {
 		expect(parseDocument(removed).unparseable).toEqual([]);
 		expect(parseDocument(removed).annotations).toEqual([a]);
 		expect(removeUnparseableLine(doc, 'not present')).toBe(doc);
+	});
+});
+
+describe('renameAnnotationFormat', () => {
+	it('renames the format on every matching annotation and no others', () => {
+		const a = makeAnnotation('a1', { format: 'Yellow' });
+		const b = makeAnnotation('b2', { format: 'Red' });
+		const c = makeAnnotation('c3', { format: 'Yellow' });
+		const doc = docWith([a, b, c].map(serializeAnnotationLine));
+		const renamed = renameAnnotationFormat(doc, 'Yellow', 'Key');
+		const parsed = parseDocument(renamed);
+		expect(parsed.annotations.map((x) => x.format)).toEqual(['Key', 'Red', 'Key']);
+		expect(parsed.body).toBe(BODY);
+	});
+
+	it('returns the document unchanged when no annotation uses the old name', () => {
+		const a = makeAnnotation('a1', { format: 'Red' });
+		const doc = docWith([serializeAnnotationLine(a)]);
+		expect(renameAnnotationFormat(doc, 'Yellow', 'Key')).toBe(doc);
+	});
+
+	it('preserves unparseable lines verbatim through a rename', () => {
+		const a = makeAnnotation('a1', { format: 'Yellow' });
+		const corrupt = '{"id":"broken", not json';
+		const doc = docWith([serializeAnnotationLine(a), corrupt]);
+		const renamed = renameAnnotationFormat(doc, 'Yellow', 'Key');
+		expect(parseDocument(renamed).unparseable).toEqual([corrupt]);
 	});
 });

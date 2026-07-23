@@ -113,12 +113,13 @@ export class AnnotationSidebarView extends ItemView {
 		const card = root.createDiv({ cls: 'mdann-card' + (isOrphan ? ' mdann-card-orphan' : '') });
 
 		const quote = card.createDiv({ cls: 'mdann-quote' });
+		const isPointComment = annotation.type === 'comment' && annotation.selector.exact === '';
 		const excerpt =
 			annotation.selector.exact.length > 120
 				? annotation.selector.exact.slice(0, 120) + '…'
 				: annotation.selector.exact;
 		const chip = quote.createEl('span', {
-			text: excerpt === '' ? '(empty quote)' : excerpt,
+			text: isPointComment ? '💬 comment marker' : excerpt === '' ? '(empty quote)' : excerpt,
 			cls: highlightClasses(annotation.type, annotation.format, this.plugin.settings),
 		});
 		chip.setCssProps(highlightStyleVars(annotation.type, annotation.format, this.plugin.settings));
@@ -135,6 +136,29 @@ export class AnnotationSidebarView extends ItemView {
 					? 'Multiple equally likely locations — select the right text and re-anchor.'
 					: 'Original text not found — select the new text and re-anchor.';
 			card.createEl('div', { text: reason, cls: 'mdann-orphan-reason' });
+		}
+
+		// Highlights get a format selector so an annotation can be reassigned
+		// to a different format after creation (formats are keyed by name).
+		if (annotation.type === 'highlight') {
+			const row = card.createDiv({ cls: 'mdann-format-select-row' });
+			row.createEl('span', { text: 'Format', cls: 'mdann-format-select-label' });
+			const select = row.createEl('select', { cls: 'dropdown mdann-format-select' });
+			const names = Object.keys(this.plugin.settings.formatStyles);
+			if (!names.includes(annotation.format)) {
+				const missing = select.createEl('option', {
+					text: `${annotation.format} (missing)`,
+					attr: { value: annotation.format },
+				});
+				missing.selected = true;
+			}
+			for (const name of names) {
+				const option = select.createEl('option', { text: name, attr: { value: name } });
+				if (name === annotation.format) option.selected = true;
+			}
+			select.addEventListener('change', () => {
+				this.plugin.setFormat(path, annotation.id, select.value);
+			});
 		}
 
 		const comment = card.createEl('textarea', {

@@ -1,26 +1,27 @@
 import type { App } from 'obsidian';
 import { FuzzySuggestModal } from 'obsidian';
-import type { AnnotationFormat } from '../core/settings';
 
-export class FormatSuggestModal extends FuzzySuggestModal<AnnotationFormat> {
+// Picker over format NAMES (formats are keyed by name in settings, and the
+// annotation JSON "format" field stores that name).
+export class FormatSuggestModal extends FuzzySuggestModal<string> {
 	constructor(
 		app: App,
-		private formats: AnnotationFormat[],
-		private onChoose: (format: AnnotationFormat) => void,
+		private names: string[],
+		private onChoose: (name: string) => void,
 	) {
 		super(app);
 		this.setPlaceholder('Choose a format');
 	}
 
-	getItems(): AnnotationFormat[] {
-		return this.formats;
+	getItems(): string[] {
+		return this.names;
 	}
 
-	getItemText(format: AnnotationFormat): string {
-		return format.name === '' ? format.id : format.name;
+	getItemText(name: string): string {
+		return name;
 	}
 
-	onChooseItem(format: AnnotationFormat): void {
-		this.onChoose(format);
+	onChooseItem(name: string): void {
+		this.onChoose(name);
 	}
 }

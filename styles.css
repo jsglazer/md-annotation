@@ -13,6 +13,36 @@ body.theme-dark .mdann-hl {
 	background-color: var(--mdann-dark-bg, transparent);
 }
 
+/* ── Comment markers (point comments — no selection) ─────────────────── */
+
+.mdann-marker {
+	display: inline-flex;
+	align-items: center;
+	vertical-align: baseline;
+	cursor: pointer;
+	border-radius: 3px;
+	padding: 0 2px;
+	margin: 0 1px;
+	color: var(--mdann-light-fg, var(--text-accent));
+	background-color: var(--mdann-light-bg, transparent);
+}
+
+body.theme-dark .mdann-marker {
+	color: var(--mdann-dark-fg, var(--text-accent));
+	background-color: var(--mdann-dark-bg, transparent);
+}
+
+.mdann-marker svg {
+	width: 0.9em;
+	height: 0.9em;
+}
+
+.mdann-marker-plain,
+body.theme-dark .mdann-marker-plain {
+	color: var(--text-muted);
+	background-color: transparent;
+}
+
 /* ── Sidebar ─────────────────────────────────────────────────────────── */
 
 .mdann-sidebar {
@@ -98,42 +128,225 @@ body.theme-dark .mdann-hl {
 	margin-bottom: var(--size-4-1);
 }
 
-/* ── Settings ────────────────────────────────────────────────────────── */
+/* ── Sidebar format selector ─────────────────────────────────────────── */
 
-.mdann-format-row .setting-item-control {
-	flex-wrap: wrap;
-	justify-content: flex-start;
-}
-
-.mdann-color-grid {
-	display: flex;
-	gap: var(--size-4-2);
-	flex-wrap: wrap;
-}
-
-.mdann-color-cell {
+.mdann-format-select-row {
 	display: flex;
 	align-items: center;
-	gap: 4px;
+	gap: var(--size-4-1);
+	margin-bottom: var(--size-4-1);
 }
 
-.mdann-color-label {
+.mdann-format-select-label {
 	font-size: var(--font-ui-smaller);
 	color: var(--text-muted);
 }
 
-.mdann-color-picker {
-	width: 28px;
+.mdann-format-select {
+	font-size: var(--font-ui-small);
+}
+
+/* ── Settings: version label, tab bar, info panel ────────────────────── */
+
+.mdann-settings-version {
+	font-size: 0.75em;
+	color: var(--text-faint);
+	margin-bottom: 8px;
+}
+
+.mdann-tab-bar {
+	display: flex;
+	gap: 4px;
+	margin-bottom: 16px;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.mdann-tab-btn {
+	font-size: 0.9em;
+	padding: 6px 14px;
+	border: none;
+	border-bottom: 2px solid transparent;
+	border-radius: 4px 4px 0 0;
+	background: transparent;
+	color: var(--text-muted);
+	cursor: pointer;
+}
+
+.mdann-tab-btn:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.mdann-tab-btn-active {
+	color: var(--text-accent);
+	border-bottom-color: var(--interactive-accent);
+}
+
+.mdann-info-panel {
+	margin: 0 0 16px;
+	padding: 10px 14px;
+	background: var(--background-secondary);
+	border-left: 3px solid var(--interactive-accent);
+	border-radius: 4px;
+	font-size: 0.88em;
+	color: var(--text-muted);
+}
+
+.mdann-info-panel p {
+	margin: 0 0 4px;
+}
+
+.mdann-info-panel p:last-child {
+	margin-bottom: 0;
+}
+
+.mdann-settings .setting-item-heading .setting-item-name {
+	font-size: 1.15em;
+	font-weight: 700;
+}
+
+/* ── Settings: color grids ───────────────────────────────────────────── */
+
+.mdann-grid-wrap {
+	overflow-x: auto;
+	margin: 8px 0 16px;
+}
+
+.mdann-grid-table {
+	border-collapse: collapse;
+}
+
+.mdann-grid-table th,
+.mdann-grid-table td {
+	padding: 3px 7px;
+	text-align: center;
+	font-size: 0.8em;
+	color: var(--text-muted);
+}
+
+.mdann-grid-table thead th {
+	font-weight: 600;
+}
+
+.mdann-grid-table tbody tr {
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+/* Vertical separators between the Light/Dark (and trailing) column groups */
+.mdann-grid-table .mdann-grid-sep {
+	border-left: 1px solid var(--background-modifier-border);
+}
+
+.mdann-grid-name-h,
+.mdann-grid-name {
+	text-align: left;
+}
+
+.mdann-grid-name {
+	font-weight: 600;
+	color: var(--text-accent);
+	white-space: nowrap;
+}
+
+.mdann-grid-row-unused td:not(:first-child) {
+	opacity: 0.45;
+}
+
+.mdann-grid-name-input {
+	width: 96px;
+	font-weight: 600;
+	color: var(--text-accent);
+	font-size: 1em;
+	padding: 2px 4px;
+	border-radius: 4px;
+	border: 1px solid var(--background-modifier-border);
+	background: var(--background-primary);
+}
+
+.mdann-grid-cell {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 3px;
+}
+
+.mdann-grid-hex {
+	width: 60px;
+	font-family: monospace;
+	font-size: 0.72em;
+	text-align: center;
+	padding: 1px 2px;
+	border-radius: 3px;
+	border: 1px solid var(--background-modifier-border);
+	background: var(--background-primary);
+	color: var(--text-normal);
+}
+
+.mdann-grid-check {
+	margin: 0;
+}
+
+/* Round color swatch */
+.mdann-grid-color {
+	appearance: none;
+	-webkit-appearance: none;
+	width: 22px;
 	height: 22px;
 	padding: 0;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 50%;
+	background: transparent;
+	cursor: pointer;
 }
 
-.mdann-color-hex {
-	width: 5.2em;
-	font-size: var(--font-ui-smaller);
+.mdann-grid-color::-webkit-color-swatch-wrapper {
+	padding: 0;
+	border-radius: 50%;
 }
 
-.mdann-color-clear {
-	padding: 0 6px;
-	font-size: var(--font-ui-smaller);
+.mdann-grid-color::-webkit-color-swatch {
+	border: none;
+	border-radius: 50%;
+}
+
+.mdann-grid-size-input {
+	width: 52px;
+	font-size: 1em;
+	padding: 2px 4px;
+	border-radius: 4px;
+	border: 1px solid var(--background-modifier-border);
+	background: var(--background-primary);
+	color: var(--text-normal);
+	text-align: center;
+}
+
+.mdann-grid-example {
+	white-space: nowrap;
+}
+
+.mdann-grid-example span {
+	border-radius: 2px;
+	padding: 0 1px;
+}
+
+.mdann-grid-del {
+	color: #c03030;
+	border: 1px solid #c03030;
+	background: transparent;
+	border-radius: 4px;
+	padding: 1px 7px;
+	cursor: pointer;
+	font-size: 0.75em;
+}
+
+.mdann-grid-del:hover {
+	background: #c03030;
+	color: #ffffff;
+}
+
+.mdann-confirm-buttons {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+	margin-top: 16px;
 }

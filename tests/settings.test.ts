@@ -1,36 +1,72 @@
 import { describe, expect, it } from 'vitest';
 import {
 	defaultSettings,
+	firstUsedFormatName,
 	formatClass,
 	highlightClasses,
 	highlightStyleVars,
+	isValidFontSize,
+	makeFormatStyle,
 	normalizeHex,
 	normalizeSettings,
+	partStyle,
 	resolveStyle,
+	usableFormatNames,
 } from '../src/core/settings';
 
 describe('normalizeSettings', () => {
 	it('returns defaults for missing or malformed data', () => {
 		expect(normalizeSettings(null)).toEqual(defaultSettings());
 		expect(normalizeSettings('junk')).toEqual(defaultSettings());
-		expect(normalizeSettings({ formats: 'nope' })).toEqual(defaultSettings());
+		expect(normalizeSettings({ formatStyles: 'nope' })).toEqual(defaultSettings());
 	});
 
-	it('keeps valid fields and drops duplicate or id-less formats', () => {
+	it('reads the current name-keyed shape and drops unsafe/empty keys', () => {
 		const s = normalizeSettings({
 			author: 'Josh',
-			commentUseAnnotationFormats: true,
-			formats: [
-				{ id: 'a', name: 'Red', style: { light: { fontColor: '#ff0000', backgroundColor: '' } } },
-				{ id: 'a', name: 'Dup' },
-				{ name: 'NoId' },
-			],
+			annotationFormattingEnabled: false,
+			formatStyles: {
+				Key: { use: true, fontSize: '12px', light: partStyle('#111111', ''), dark: partStyle() },
+				'': makeFormatStyle(),
+				__proto__: makeFormatStyle(),
+			},
 		});
 		expect(s.author).toBe('Josh');
-		expect(s.commentUseAnnotationFormats).toBe(true);
-		expect(s.formats.map((f) => f.id)).toEqual(['a']);
-		expect(s.formats[0]?.style.light.fontColor).toBe('#ff0000');
-		expect(s.formats[0]?.style.dark).toEqual({ fontColor: '', backgroundColor: '' });
+		expect(s.annotationFormattingEnabled).toBe(false);
+		expect(Object.keys(s.formatStyles)).toEqual(['Key']);
+		expect(s.formatStyles['Key']?.fontSize).toBe('12px');
+		expect(s.formatStyles['Key']?.light.fr).toEqual({ enabled: true, color: '#111111' });
+	});
+
+	it('migrates the legacy formats array to a name-keyed record', () => {
+		const s = normalizeSettings({
+			formats: [
+				{
+					id: 'abc-123',
+					name: 'Red',
+					style: { light: { fontColor: '#ff0000', backgroundColor: '' } },
+				},
+				{ id: 'abc-123', name: 'Red' }, // duplicate name dropped
+				{ id: 'id-only' }, // falls back to id as name
+			],
+		});
+		expect(Object.keys(s.formatStyles)).toEqual(['Red', 'id-only']);
+		const red = s.formatStyles['Red'];
+		expect(red?.use).toBe(true);
+		expect(red?.light.fr).toEqual({ enabled: true, color: '#ff0000' });
+		expect(red?.light.bg).toEqual({ enabled: false, color: '' });
+	});
+
+	it('migrates the legacy commentStyle {fontColor, backgroundColor} shape', () => {
+		const s = normalizeSettings({
+			commentStyle: {
+				light: { fontColor: '', backgroundColor: '#c8e6c9' },
+				dark: { fontColor: '#ffffff', backgroundColor: '' },
+			},
+		});
+		expect(s.commentStyle.light.bg).toEqual({ enabled: true, color: '#c8e6c9' });
+		expect(s.commentStyle.dark.fr).toEqual({ enabled: true, color: '#ffffff' });
+		expect(s.commentStyle.dark.bg).toEqual({ enabled: false, color: '' });
 	});
 });
 
@@ -45,10 +81,44 @@ describe('normalizeHex', () => {
 	});
 });
 
+describe('isValidFontSize', () => {
+	it('accepts plain CSS lengths and keywords only', () => {
+		expect(isValidFontSize('12px')).toBe(true);
+		expect(isValidFontSize('1.1em')).toBe(true);
+		expect(isValidFontSize('90%')).toBe(true);
+		expect(isValidFontSize('x-small')).toBe(true);
+		expect(isValidFontSize('')).toBe(false);
+		expect(isValidFontSize('12px; color: red')).toBe(false);
+	});
+});
+
+describe('resolveStyle / format fallbacks', () => {
+	it('resolves the dedicated comment style for format ""', () => {
+		const s = defaultSettings();
+		expect(resolveStyle('comment', '', s)?.style).toBe(s.commentStyle);
+	});
+
+	it('falls back to the first Use-checked format for unknown names', () => {
+		const s = defaultSettings();
+		expect(resolveStyle('highlight', 'gone', s)?.style).toBe(s.formatStyles['Yellow']);
+	});
+
+	it('skips formats with Use unchecked', () => {
+		const s = defaultSettings();
+		s.formatStyles['Red'] = makeFormatStyle();
+		const yellow = s.formatStyles['Yellow'];
+		if (!yellow) throw new Error('default format missing');
+		yellow.use = false;
+		expect(firstUsedFormatName(s)).toBe('Red');
+		expect(usableFormatNames(s)).toEqual(['Red']);
+		expect(resolveStyle('highlight', 'Yellow', s)?.style).toBe(s.formatStyles['Red']);
+	});
+});
+
 describe('highlightStyleVars', () => {
 	it('emits per-theme custom properties from the resolved format', () => {
 		const s = defaultSettings();
-		expect(highlightStyleVars('highlight', 'default', s)).toEqual({
+		expect(highlightStyleVars('highlight', 'Yellow', s)).toEqual({
 			'--mdann-light-fg': 'inherit',
 			'--mdann-light-bg': '#fff3a3',
 			'--mdann-dark-fg': 'inherit',
@@ -56,40 +126,49 @@ describe('highlightStyleVars', () => {
 		});
 	});
 
-	it('never emits invalid color values (no CSS injection from settings)', () => {
+	it('ignores disabled colors even when a color is stored', () => {
 		const s = defaultSettings();
-		const fmt = s.formats[0];
-		if (!fmt) throw new Error('default format missing');
-		fmt.style.light.backgroundColor = 'red; } body { display:none';
-		fmt.style.light.fontColor = '#123456';
-		const vars = highlightStyleVars('highlight', 'default', s);
-		expect(vars['--mdann-light-bg']).toBe('transparent');
-		expect(vars['--mdann-light-fg']).toBe('#123456');
+		const yellow = s.formatStyles['Yellow'];
+		if (!yellow) throw new Error('default format missing');
+		yellow.light.bg.enabled = false;
+		expect(highlightStyleVars('highlight', 'Yellow', s)['--mdann-light-bg']).toBe('transparent');
 	});
 
-	it('resolves the dedicated comment style unless comments share formats', () => {
+	it('never emits invalid color or size values (no CSS injection)', () => {
 		const s = defaultSettings();
-		expect(resolveStyle('comment', '', s)).toBe(s.commentStyle);
-		s.commentUseAnnotationFormats = true;
-		expect(resolveStyle('comment', 'default', s)).toBe(s.formats[0]?.style);
-		// Unknown format id falls back to the first format.
-		expect(resolveStyle('highlight', 'gone', s)).toBe(s.formats[0]?.style);
+		const yellow = s.formatStyles['Yellow'];
+		if (!yellow) throw new Error('default format missing');
+		yellow.light.bg.color = 'red; } body { display:none';
+		yellow.light.fr = { enabled: true, color: '#123456' };
+		yellow.fontSize = '12px; color: red';
+		const vars = highlightStyleVars('highlight', 'Yellow', s);
+		expect(vars['--mdann-light-bg']).toBe('transparent');
+		expect(vars['--mdann-light-fg']).toBe('#123456');
+		expect(vars['font-size']).toBeUndefined();
+	});
+
+	it('emits a validated font-size', () => {
+		const s = defaultSettings();
+		const yellow = s.formatStyles['Yellow'];
+		if (!yellow) throw new Error('default format missing');
+		yellow.fontSize = '1.2em';
+		expect(highlightStyleVars('highlight', 'Yellow', s)['font-size']).toBe('1.2em');
 	});
 });
 
 describe('highlightClasses', () => {
-	it('uses the dedicated comment class when comments do not share formats', () => {
+	it('uses the dedicated comment class for format ""', () => {
 		const s = defaultSettings();
 		expect(highlightClasses('comment', '', s)).toBe('mdann-hl mdann-comment');
-		expect(highlightClasses('highlight', 'default', s)).toBe('mdann-hl mdann-f-default');
+		expect(highlightClasses('highlight', 'Yellow', s)).toBe('mdann-hl mdann-f-Yellow');
 	});
 
-	it('falls back to the first format for an unknown format id', () => {
+	it('falls back to the first used format for an unknown name', () => {
 		const s = defaultSettings();
-		expect(highlightClasses('highlight', 'deleted-format', s)).toBe('mdann-hl mdann-f-default');
+		expect(highlightClasses('highlight', 'deleted-format', s)).toBe('mdann-hl mdann-f-Yellow');
 	});
 
-	it('sanitizes format ids into safe class names', () => {
-		expect(formatClass('weird id!')).toBe('mdann-f-weird-id-');
+	it('sanitizes format names into safe class names', () => {
+		expect(formatClass('weird name!')).toBe('mdann-f-weird-name-');
 	});
 });

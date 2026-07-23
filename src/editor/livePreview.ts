@@ -1,6 +1,8 @@
 // CodeMirror 6 integration: transient mark decorations for Live Preview and
-// Source mode. Nothing is ever written into the document here — highlights
-// exist only as decorations that map through edits between resolutions.
+// Source mode, plus widget decorations for point comments (comments added
+// with no selection render as a small marker icon). Nothing is ever written
+// into the document here — highlights exist only as decorations that map
+// through edits between resolutions.
 //
 // The ViewPlugin below is also how the plugin obtains EditorView handles:
 // CodeMirror instantiates it per editor, so no undocumented Obsidian
@@ -8,13 +10,17 @@
 
 import { RangeSetBuilder, StateEffect, StateField } from '@codemirror/state';
 import type { Extension } from '@codemirror/state';
-import { Decoration, EditorView, ViewPlugin } from '@codemirror/view';
+import { Decoration, EditorView, ViewPlugin, WidgetType } from '@codemirror/view';
 import type { DecorationSet } from '@codemirror/view';
-import { editorInfoField } from 'obsidian';
+import { editorInfoField, setIcon } from 'obsidian';
 
 import type { MatchResult } from '../core/matcher';
 import type { MdAnnotationSettings } from '../core/settings';
-import { highlightClasses, highlightStyleText } from '../core/settings';
+import {
+	highlightClasses,
+	highlightStyleText,
+	markerClasses,
+} from '../core/settings';
 import type { Annotation } from '../core/types';
 
 // Replaces the current decoration set wholesale after a resolution pass.
@@ -70,27 +76,99 @@ export function editorViewPath(view: EditorView): string | null {
 	return view.state.field(editorInfoField, false)?.file?.path ?? null;
 }
 
+// Inline marker rendered at a point comment's anchor position. The click
+// callback is provided per-decoration pass and deliberately excluded from
+// eq() so redraws only happen when the visible bits change.
+class CommentMarkerWidget extends WidgetType {
+	constructor(
+		private annotationId: string,
+		private classes: string,
+		private styleText: string,
+		private onClick: () => void,
+	) {
+		super();
+	}
+
+	eq(other: CommentMarkerWidget): boolean {
+		return (
+			other.annotationId === this.annotationId &&
+			other.classes === this.classes &&
+			other.styleText === this.styleText
+		);
+	}
+
+	toDOM(view: EditorView): HTMLElement {
+		const span = view.dom.ownerDocument.createElement('span');
+		span.className = this.classes;
+		span.setAttribute('data-mdann-id', this.annotationId);
+		if (this.styleText !== '') span.setAttribute('style', this.styleText);
+		setIcon(span, 'message-square');
+		span.addEventListener('click', (e) => {
+			e.preventDefault();
+			this.onClick();
+		});
+		return span;
+	}
+
+	ignoreEvent(): boolean {
+		return false;
+	}
+}
+
 // Build and dispatch the decoration set for one editor from resolved matches.
+// Range annotations become mark decorations; point comments (start === end)
+// become marker widgets. Visibility toggles are applied here:
+//   - annotationFormattingEnabled off → no highlight decorations
+//   - commentsFormattingEnabled off → range comments undecorated, markers plain
+//   - commentsHiddenEnabled on → no markers at all
 export function applyEditorDecorations(
 	view: EditorView,
 	annotations: ReadonlyArray<Annotation>,
 	outcomes: ReadonlyMap<string, MatchResult>,
 	settings: MdAnnotationSettings,
+	onMarkerClick: (annotationId: string) => void,
 ): void {
 	const docLength = view.state.doc.length;
 	const ranges: Array<{ from: number; to: number; annotation: Annotation }> = [];
 	for (const annotation of annotations) {
 		const outcome = outcomes.get(annotation.id);
 		if (!outcome || outcome.status !== 'matched') continue;
-		const from = Math.max(0, outcome.start);
+		const from = Math.max(0, Math.min(outcome.start, docLength));
 		const to = Math.min(outcome.end, docLength);
-		if (from >= to) continue;
+		if (from > to) continue;
+		if (from === to) {
+			// Point comment marker.
+			if (annotation.type !== 'comment' || settings.commentsHiddenEnabled) continue;
+			ranges.push({ from, to, annotation });
+			continue;
+		}
+		if (annotation.type === 'highlight' && !settings.annotationFormattingEnabled) continue;
+		if (annotation.type === 'comment' && !settings.commentsFormattingEnabled) continue;
 		ranges.push({ from, to, annotation });
 	}
 	ranges.sort((a, b) => a.from - b.from || a.to - b.to);
 
 	const builder = new RangeSetBuilder<Decoration>();
 	for (const r of ranges) {
+		if (r.from === r.to) {
+			const styled = settings.commentsFormattingEnabled;
+			builder.add(
+				r.from,
+				r.to,
+				Decoration.widget({
+					widget: new CommentMarkerWidget(
+						r.annotation.id,
+						markerClasses() + (styled ? '' : ' mdann-marker-plain'),
+						styled
+							? highlightStyleText(r.annotation.type, r.annotation.format, settings)
+							: '',
+						() => onMarkerClick(r.annotation.id),
+					),
+					side: 1,
+				}),
+			);
+			continue;
+		}
 		builder.add(
 			r.from,
 			r.to,

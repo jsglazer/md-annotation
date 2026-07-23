@@ -1,62 +1,92 @@
-// Settings model, defensive normalization, and the CSS generator for the
-// dynamic style element. Pure module — no 'obsidian', no DOM.
+// Settings model, defensive normalization, and style resolution. Pure module —
+// no 'obsidian', no DOM.
 //
-// Format/style definitions live in the plugin's settings (data.json),
-// mirroring annotation-manager; annotation DATA never goes there.
+// The model mirrors annotation-manager's settings (per-format grid with
+// enable-checkbox colors, light/dark themes, font size, Use toggle) minus
+// everything bracket-related — md-annotation has no in-text delimiters.
+// Format styles are keyed by the format NAME (e.g. "Yellow", "Key"), and the
+// annotation JSON "format" field stores that same name.
 
-export interface ThemeColors {
-	fontColor: string; // '#rrggbb' or '' (not applied)
-	backgroundColor: string;
+// One color plus its enable checkbox; a disabled color is not applied.
+export interface ColorOption {
+	enabled: boolean;
+	color: string; // '#rrggbb' or ''
 }
 
-export interface FormatStyle {
-	light: ThemeColors;
-	dark: ThemeColors;
+// One Fr/Bg pair (Fr = foreground/text color, Bg = background color).
+export interface PartStyle {
+	fr: ColorOption;
+	bg: ColorOption;
 }
 
-export interface AnnotationFormat {
-	id: string;
-	name: string;
-	style: FormatStyle;
+// Light/dark halves shared by formats and the dedicated comment style.
+export interface ThemedPartStyles {
+	light: PartStyle;
+	dark: PartStyle;
+}
+
+// Per-format style: row-level Use toggle, font size, and Fr/Bg per theme.
+export interface FormatStyle extends ThemedPartStyles {
+	use: boolean;
+	fontSize: string;
 }
 
 export interface MdAnnotationSettings {
 	author: string;
-	formats: AnnotationFormat[];
-	// true → comments pick from the annotation formats; false → all comments
-	// use the single dedicated comment style below.
-	commentUseAnnotationFormats: boolean;
-	commentStyle: FormatStyle;
+	// Keyed by format name. The annotation JSON "format" field stores the name.
+	formatStyles: Record<string, FormatStyle>;
+
+	// Visibility toggles (also driven by the show/hide commands).
+	annotationFormattingEnabled: boolean;
+	commentsFormattingEnabled: boolean;
+	commentsHiddenEnabled: boolean;
+
+	// The single dedicated style for comments (point markers).
+	commentStyle: ThemedPartStyles;
 }
 
-// ── Defaults ───────────────────────────────────────────────────────────────
+// ── Construction helpers ───────────────────────────────────────────────────
 
-function themeColors(fontColor = '', backgroundColor = ''): ThemeColors {
-	return { fontColor, backgroundColor };
+export function colorOption(color = ''): ColorOption {
+	return { enabled: color !== '', color };
+}
+
+export function partStyle(fr = '', bg = ''): PartStyle {
+	return { fr: colorOption(fr), bg: colorOption(bg) };
+}
+
+export function makeFormatStyle(): FormatStyle {
+	return { use: true, fontSize: '', light: partStyle(), dark: partStyle() };
+}
+
+// Keys from settings data are used as object property names. Reject the ones
+// that would mutate an object's prototype.
+export function isUnsafeKey(key: string): boolean {
+	return key === '__proto__' || key === 'constructor' || key === 'prototype';
 }
 
 export function defaultSettings(): MdAnnotationSettings {
 	return {
 		author: '',
-		formats: [
-			{
-				id: 'default',
-				name: 'Yellow',
-				style: {
-					light: themeColors('', '#fff3a3'),
-					dark: themeColors('', '#7a6f1f'),
-				},
+		formatStyles: {
+			Yellow: {
+				use: true,
+				fontSize: '',
+				light: partStyle('', '#fff3a3'),
+				dark: partStyle('', '#7a6f1f'),
 			},
-		],
-		commentUseAnnotationFormats: false,
+		},
+		annotationFormattingEnabled: true,
+		commentsFormattingEnabled: true,
+		commentsHiddenEnabled: false,
 		commentStyle: {
-			light: themeColors('', '#c8e6c9'),
-			dark: themeColors('', '#2e5d33'),
+			light: partStyle('', '#c8e6c9'),
+			dark: partStyle('', '#2e5d33'),
 		},
 	};
 }
 
-// ── Normalization (defensive read of data.json) ────────────────────────────
+// ── Normalization (defensive read of data.json, with legacy migration) ─────
 
 function asRecord(v: unknown): Record<string, unknown> | null {
 	return v !== null && typeof v === 'object' && !Array.isArray(v)
@@ -68,16 +98,40 @@ function readString(v: unknown): string {
 	return typeof v === 'string' ? v : '';
 }
 
-function readThemeColors(v: unknown): ThemeColors {
+function readColorOption(v: unknown): ColorOption {
 	const r = asRecord(v);
-	if (!r) return themeColors();
-	return themeColors(readString(r.fontColor), readString(r.backgroundColor));
+	if (!r) return colorOption();
+	return { enabled: r.enabled === true, color: readString(r.color) };
+}
+
+function readPartStyle(v: unknown): PartStyle {
+	const r = asRecord(v);
+	if (!r) return partStyle();
+	return { fr: readColorOption(r.fr), bg: readColorOption(r.bg) };
+}
+
+// Legacy {fontColor, backgroundColor} → PartStyle (enabled when non-empty).
+function legacyPartStyle(v: unknown): PartStyle {
+	const r = asRecord(v);
+	if (!r) return partStyle();
+	return partStyle(readString(r.fontColor), readString(r.backgroundColor));
+}
+
+function readThemedPartStyles(v: unknown): ThemedPartStyles {
+	const r = asRecord(v);
+	if (!r) return { light: partStyle(), dark: partStyle() };
+	return { light: readPartStyle(r.light), dark: readPartStyle(r.dark) };
 }
 
 function readFormatStyle(v: unknown): FormatStyle {
 	const r = asRecord(v);
-	if (!r) return { light: themeColors(), dark: themeColors() };
-	return { light: readThemeColors(r.light), dark: readThemeColors(r.dark) };
+	if (!r) return makeFormatStyle();
+	return {
+		use: r.use !== false,
+		fontSize: readString(r.fontSize),
+		light: readPartStyle(r.light),
+		dark: readPartStyle(r.dark),
+	};
 }
 
 export function normalizeSettings(raw: unknown): MdAnnotationSettings {
@@ -86,29 +140,63 @@ export function normalizeSettings(raw: unknown): MdAnnotationSettings {
 	if (!r) return s;
 
 	if (typeof r.author === 'string') s.author = r.author;
-	if (typeof r.commentUseAnnotationFormats === 'boolean') {
-		s.commentUseAnnotationFormats = r.commentUseAnnotationFormats;
-	}
-	if (r.commentStyle !== undefined) s.commentStyle = readFormatStyle(r.commentStyle);
 
-	if (Array.isArray(r.formats)) {
-		const formats: AnnotationFormat[] = [];
-		const seen = new Set<string>();
+	const booleanKeys = [
+		'annotationFormattingEnabled',
+		'commentsFormattingEnabled',
+		'commentsHiddenEnabled',
+	] as const;
+	for (const key of booleanKeys) {
+		if (typeof r[key] === 'boolean') s[key] = r[key];
+	}
+
+	const styles = asRecord(r.formatStyles);
+	if (styles) {
+		// Current shape: name-keyed record.
+		const next: Record<string, FormatStyle> = {};
+		for (const [name, value] of Object.entries(styles)) {
+			if (name === '' || isUnsafeKey(name)) continue;
+			const v = asRecord(value);
+			if (!v) continue;
+			next[name] = readFormatStyle(v);
+		}
+		if (Object.keys(next).length > 0) s.formatStyles = next;
+	} else if (Array.isArray(r.formats)) {
+		// Legacy shape: formats array of {id, name, style: {light/dark
+		// {fontColor, backgroundColor}}} → name-keyed record (id as fallback
+		// name), enabled flags derived from non-empty colors.
+		const next: Record<string, FormatStyle> = {};
 		for (const item of r.formats) {
 			const f = asRecord(item);
 			if (!f) continue;
-			const id = readString(f.id);
-			if (id === '' || seen.has(id)) continue;
-			seen.add(id);
-			formats.push({ id, name: readString(f.name), style: readFormatStyle(f.style) });
+			const name = readString(f.name) !== '' ? readString(f.name) : readString(f.id);
+			if (name === '' || isUnsafeKey(name) || next[name]) continue;
+			const style = asRecord(f.style);
+			next[name] = {
+				use: true,
+				fontSize: '',
+				light: legacyPartStyle(style?.light),
+				dark: legacyPartStyle(style?.dark),
+			};
 		}
-		if (formats.length > 0) s.formats = formats;
+		if (Object.keys(next).length > 0) s.formatStyles = next;
+	}
+
+	const cs = asRecord(r.commentStyle);
+	if (cs) {
+		const light = asRecord(cs.light);
+		// Current shape stores {fr, bg}; legacy stored {fontColor, backgroundColor}.
+		if (light && ('fr' in light || 'bg' in light)) {
+			s.commentStyle = readThemedPartStyles(cs);
+		} else {
+			s.commentStyle = { light: legacyPartStyle(cs.light), dark: legacyPartStyle(cs.dark) };
+		}
 	}
 
 	return s;
 }
 
-// ── Hex validation ─────────────────────────────────────────────────────────
+// ── Hex / font-size validation ─────────────────────────────────────────────
 
 // Accepts hex with or without the # prefix; always returns WITH # (needed for
 // CSS), or '' when invalid.
@@ -124,55 +212,98 @@ function isValidHex(v: string): boolean {
 	return /^#[0-9a-fA-F]{6}$/.test(v);
 }
 
-// ── CSS classes & dynamic stylesheet ───────────────────────────────────────
+// fontSize ends up in inline style attributes — restrict it to a plain CSS
+// length (12px, 1.1em, 90%…) or a bare keyword (large, x-small…) so it cannot
+// inject additional declarations/rules.
+export function isValidFontSize(value: string): boolean {
+	const v = value.trim();
+	if (v === '') return false;
+	return /^\d+(\.\d+)?(px|pt|em|rem|%|vh|vw)$/.test(v) || /^[a-zA-Z-]+$/.test(v);
+}
+
+// ── CSS classes & inline style resolution ──────────────────────────────────
 
 export const HIGHLIGHT_CLASS = 'mdann-hl';
 export const COMMENT_CLASS = 'mdann-comment';
+export const MARKER_CLASS = 'mdann-marker';
 
-export function formatClass(formatId: string): string {
-	return 'mdann-f-' + formatId.replace(/[^a-zA-Z0-9_-]/g, '-');
+export function formatClass(formatName: string): string {
+	return 'mdann-f-' + formatName.replace(/[^a-zA-Z0-9_-]/g, '-');
 }
 
-// Resolve which FormatStyle applies to one annotation.
+// First format whose Use box is checked ('' when none).
+export function firstUsedFormatName(settings: MdAnnotationSettings): string {
+	for (const [name, style] of Object.entries(settings.formatStyles)) {
+		if (style.use) return name;
+	}
+	return '';
+}
+
+// Format names available for new annotations (Use checked), insertion order.
+export function usableFormatNames(settings: MdAnnotationSettings): string[] {
+	return Object.entries(settings.formatStyles)
+		.filter(([, style]) => style.use)
+		.map(([name]) => name);
+}
+
+export interface ResolvedFormat {
+	style: ThemedPartStyles;
+	fontSize: string;
+}
+
+// Resolve which style applies to one annotation. Comments (format '') use the
+// dedicated comment style; highlights resolve their format name, falling back
+// to the first Use-checked format when the name is unknown or unchecked
+// (covers renamed/deleted formats until the user reassigns via the sidebar).
 export function resolveStyle(
 	annotationType: 'highlight' | 'comment',
-	formatId: string,
+	formatName: string,
 	settings: MdAnnotationSettings,
-): FormatStyle {
-	if (annotationType === 'comment' && !settings.commentUseAnnotationFormats) {
-		return settings.commentStyle;
+): ResolvedFormat | null {
+	if (annotationType === 'comment' && formatName === '') {
+		return { style: settings.commentStyle, fontSize: '' };
 	}
-	const found = settings.formats.find((f) => f.id === formatId) ?? settings.formats[0];
-	return found ? found.style : settings.commentStyle;
+	const exact = settings.formatStyles[formatName];
+	if (exact?.use) return { style: exact, fontSize: exact.fontSize };
+	const fallback = settings.formatStyles[firstUsedFormatName(settings)];
+	return fallback ? { style: fallback, fontSize: fallback.fontSize } : null;
 }
 
-// Inline CSS custom properties for one highlight. Static rules in styles.css
-// consume these per theme, so colors follow light/dark switches without any
-// dynamic stylesheet. Only validated hex values are ever emitted (invalid
-// settings text degrades to the theme defaults — no CSS injection).
+function enabledColor(opt: ColorOption): string {
+	return opt.enabled && isValidHex(opt.color) ? opt.color : '';
+}
+
+// Inline CSS custom properties for one highlight/marker. Static rules in
+// styles.css consume these per theme, so colors follow light/dark switches.
+// Only validated hex values (and a validated font-size) are ever emitted —
+// invalid settings text degrades to defaults, no CSS injection.
 export function highlightStyleVars(
 	annotationType: 'highlight' | 'comment',
-	formatId: string,
+	formatName: string,
 	settings: MdAnnotationSettings,
 ): Record<string, string> {
-	const style = resolveStyle(annotationType, formatId, settings);
-	const color = (v: string, fallback: string): string => (isValidHex(v) ? v : fallback);
-	return {
-		'--mdann-light-fg': color(style.light.fontColor, 'inherit'),
-		'--mdann-light-bg': color(style.light.backgroundColor, 'transparent'),
-		'--mdann-dark-fg': color(style.dark.fontColor, 'inherit'),
-		'--mdann-dark-bg': color(style.dark.backgroundColor, 'transparent'),
+	const resolved = resolveStyle(annotationType, formatName, settings);
+	if (!resolved) return {};
+	const { style, fontSize } = resolved;
+	const color = (opt: ColorOption, fallback: string): string => enabledColor(opt) || fallback;
+	const vars: Record<string, string> = {
+		'--mdann-light-fg': color(style.light.fr, 'inherit'),
+		'--mdann-light-bg': color(style.light.bg, 'transparent'),
+		'--mdann-dark-fg': color(style.dark.fr, 'inherit'),
+		'--mdann-dark-bg': color(style.dark.bg, 'transparent'),
 	};
+	if (isValidFontSize(fontSize)) vars['font-size'] = fontSize.trim();
+	return vars;
 }
 
-// The same custom properties as a style-attribute string (for CodeMirror
-// decoration attributes).
+// The same properties as a style-attribute string (for CodeMirror decoration
+// attributes).
 export function highlightStyleText(
 	annotationType: 'highlight' | 'comment',
-	formatId: string,
+	formatName: string,
 	settings: MdAnnotationSettings,
 ): string {
-	return Object.entries(highlightStyleVars(annotationType, formatId, settings))
+	return Object.entries(highlightStyleVars(annotationType, formatName, settings))
 		.map(([prop, value]) => `${prop}: ${value};`)
 		.join(' ');
 }
@@ -180,14 +311,20 @@ export function highlightStyleText(
 // The CSS class list for one annotation's highlight span/decoration.
 export function highlightClasses(
 	annotationType: 'highlight' | 'comment',
-	formatId: string,
+	formatName: string,
 	settings: MdAnnotationSettings,
 ): string {
-	if (annotationType === 'comment' && !settings.commentUseAnnotationFormats) {
+	if (annotationType === 'comment' && formatName === '') {
 		return `${HIGHLIGHT_CLASS} ${COMMENT_CLASS}`;
 	}
-	const known = settings.formats.some((f) => f.id === formatId);
-	const fallback = settings.formats[0];
-	const id = known ? formatId : fallback ? fallback.id : formatId;
-	return `${HIGHLIGHT_CLASS} ${formatClass(id)}`;
+	const known = settings.formatStyles[formatName]?.use;
+	const name = known ? formatName : firstUsedFormatName(settings);
+	return name === ''
+		? HIGHLIGHT_CLASS
+		: `${HIGHLIGHT_CLASS} ${formatClass(name)}`;
+}
+
+// The CSS class list for a point-comment marker.
+export function markerClasses(): string {
+	return `${MARKER_CLASS} ${COMMENT_CLASS}`;
 }

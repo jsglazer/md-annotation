@@ -326,10 +326,37 @@ function acceptWithRefresh(
 	};
 }
 
+// ── Point resolution (empty quote: comment markers) ────────────────────────
+
+// A point selector has exact === '' and anchors purely on its prefix/suffix
+// context. Candidate positions come from occurrences of the innermost anchor
+// keys; the full stored context then scores each position.
+function resolvePoint(text: string, selector: TextQuoteSelector): MatchResult {
+	const prefixKey = selector.prefix.slice(-ANCHOR_KEY_LENGTH);
+	const suffixKey = selector.suffix.slice(0, ANCHOR_KEY_LENGTH);
+	if (prefixKey === '' && suffixKey === '') return { status: 'orphaned', reason: 'not-found' };
+
+	const positions = new Set<number>();
+	for (const i of indicesOf(text, prefixKey)) positions.add(i + prefixKey.length);
+	for (const i of indicesOf(text, suffixKey)) positions.add(i);
+
+	const scored = [...positions]
+		.map((pos) => ({ pos, score: contextScore(text, pos, pos, selector) }))
+		.sort((a, b) => b.score - a.score || a.pos - b.pos);
+
+	const best = scored[0];
+	if (!best || best.score < HIGH_CONFIDENCE) return { status: 'orphaned', reason: 'not-found' };
+	const rival = scored.slice(1).find((c) => c.pos !== best.pos);
+	if (rival && best.score - rival.score < AMBIGUITY_MARGIN) {
+		return { status: 'orphaned', reason: 'ambiguous' };
+	}
+	return acceptWithRefresh(text, best.pos, best.pos, Math.min(best.score, 1), selector);
+}
+
 // ── Public entry points ────────────────────────────────────────────────────
 
 export function resolveSelector(text: string, selector: TextQuoteSelector): MatchResult {
-	if (selector.exact === '') return { status: 'orphaned', reason: 'not-found' };
+	if (selector.exact === '') return resolvePoint(text, selector);
 
 	const exactResult = resolveExact(text, selector);
 	if (exactResult) return exactResult;

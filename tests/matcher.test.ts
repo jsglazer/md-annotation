@@ -189,3 +189,46 @@ describe('diceSimilarity', () => {
 		expect(near - far).toBeGreaterThan(AMBIGUITY_MARGIN);
 	});
 });
+
+describe('resolveSelector — point selectors (comment markers)', () => {
+	it('resolves a point by its surrounding context with confidence 1', () => {
+		const pos = DOC.indexOf('second');
+		const sel = captureSelector(DOC, pos, pos);
+		expect(sel.exact).toBe('');
+		const result = resolveSelector(DOC, sel);
+		expect(result).toMatchObject({
+			status: 'matched',
+			start: pos,
+			end: pos,
+			confidence: 1,
+			refreshedSelector: null,
+		});
+	});
+
+	it('resolves a point at the start and end of the document', () => {
+		const head = resolveSelector(DOC, captureSelector(DOC, 0, 0));
+		expect(head).toMatchObject({ status: 'matched', start: 0, end: 0 });
+		const tail = resolveSelector(DOC, captureSelector(DOC, DOC.length, DOC.length));
+		expect(tail).toMatchObject({ status: 'matched', start: DOC.length, end: DOC.length });
+	});
+
+	it('tracks a point after text is inserted elsewhere', () => {
+		const pos = DOC.indexOf('final');
+		const sel = captureSelector(DOC, pos, pos);
+		const edited = 'A brand new opening sentence. ' + DOC;
+		const result = resolveSelector(edited, sel);
+		expect(result).toMatchObject({ status: 'matched', start: edited.indexOf('final') });
+		if (result.status === 'matched') expect(result.refreshedSelector).toBeNull();
+	});
+
+	it('orphans a point whose context has vanished', () => {
+		const sel: TextQuoteSelector = { exact: '', prefix: 'gone forever ', suffix: ' never was' };
+		const result = resolveSelector(DOC, sel);
+		expect(result).toEqual({ status: 'orphaned', reason: 'not-found' });
+	});
+
+	it('orphans an empty selector with no context at all', () => {
+		const sel: TextQuoteSelector = { exact: '', prefix: '', suffix: '' };
+		expect(resolveSelector(DOC, sel)).toEqual({ status: 'orphaned', reason: 'not-found' });
+	});
+});

@@ -174,6 +174,22 @@ export function removeAnnotation(doc: string, id: string): string {
 	return composeDocument(body, next, unparseable);
 }
 
+// Renames a format across every annotation in one document (settings-driven
+// mass rename — dates are left untouched). Returns the document unchanged
+// when no annotation uses `oldName`.
+export function renameAnnotationFormat(doc: string, oldName: string, newName: string): string {
+	const { body, annotations, unparseable } = parseDocument(doc);
+	let changed = false;
+	for (const a of annotations) {
+		if (a.format === oldName) {
+			a.format = newName;
+			changed = true;
+		}
+	}
+	if (!changed) return doc;
+	return composeDocument(body, annotations, unparseable);
+}
+
 // Removes the first preserved line strictly equal to `raw` (a deliberate,
 // user-initiated deletion from the sidebar — the only path that drops data).
 export function removeUnparseableLine(doc: string, raw: string): string {

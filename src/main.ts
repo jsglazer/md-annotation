@@ -6,18 +6,22 @@ import type { Editor, MarkdownFileInfo, TFile } from 'obsidian';
 import { MarkdownView, Notice, Plugin } from 'obsidian';
 import type { EditorView } from '@codemirror/view';
 
+import type { MdAnnotationAPI } from './api';
+import { createApi } from './api';
 import { createAnnotation, formatTimestamp, generateAnnotationId } from './core/annotation';
 import {
+	BLOCK_OPEN,
 	parseDocument,
 	removeAnnotation,
 	removeUnparseableLine,
+	renameAnnotationFormat,
 	updateAnnotation,
 	upsertAnnotation,
 } from './core/block';
 import { captureSelector, resolveSelectors } from './core/matcher';
 import { WriteQueue } from './core/queue';
 import type { MdAnnotationSettings } from './core/settings';
-import { normalizeSettings } from './core/settings';
+import { isUnsafeKey, normalizeSettings, usableFormatNames } from './core/settings';
 import type { Annotation, AnnotationType, TextQuoteSelector } from './core/types';
 import {
 	applyEditorDecorations,
@@ -36,6 +40,8 @@ const DISK_REFRESH_DEBOUNCE_MS = 400;
 export default class MdAnnotationPlugin extends Plugin {
 	settings: MdAnnotationSettings = normalizeSettings(null);
 	queue!: WriteQueue;
+	// Public query API for dataviewjs / datacorejs blocks — see src/api.ts.
+	api!: MdAnnotationAPI;
 
 	private states = new Map<string, FileAnnotationState>();
 	private editors = new Set<EditorView>();
@@ -45,6 +51,7 @@ export default class MdAnnotationPlugin extends Plugin {
 
 	async onload(): Promise<void> {
 		this.settings = normalizeSettings(await this.loadData());
+		this.api = createApi(this.app.vault);
 
 		this.queue = new WriteQueue(
 			{
@@ -70,18 +77,13 @@ export default class MdAnnotationPlugin extends Plugin {
 			void this.activateSidebar();
 		});
 
+		// One command covers both cases: with a selection it adds an annotation
+		// (highlight), without one it inserts a comment marker at the cursor.
 		this.addCommand({
-			id: 'annotate-selection',
-			name: 'Annotate selection',
+			id: 'annotate',
+			name: 'Annotate',
 			editorCallback: (editor, ctx) => {
-				this.promptAnnotate(editor, ctx);
-			},
-		});
-		this.addCommand({
-			id: 'comment-selection',
-			name: 'Comment on selection',
-			editorCallback: (editor, ctx) => {
-				this.promptComment(editor, ctx);
+				this.annotateOrComment(editor, ctx);
 			},
 		});
 		this.addCommand({
@@ -91,24 +93,38 @@ export default class MdAnnotationPlugin extends Plugin {
 				void this.activateSidebar();
 			},
 		});
+		this.addCommand({
+			id: 'toggle-annotation-formats',
+			name: 'Show/hide annotation formats',
+			callback: () => {
+				this.settings.annotationFormattingEnabled = !this.settings.annotationFormattingEnabled;
+				void this.saveSettings();
+				new Notice(
+					`Annotation formats ${this.settings.annotationFormattingEnabled ? 'shown' : 'hidden'}`,
+				);
+			},
+		});
+		this.addCommand({
+			id: 'toggle-comment-formats',
+			name: 'Show/hide comment formats',
+			callback: () => {
+				this.settings.commentsFormattingEnabled = !this.settings.commentsFormattingEnabled;
+				void this.saveSettings();
+				new Notice(
+					`Comment formats ${this.settings.commentsFormattingEnabled ? 'shown' : 'hidden'}`,
+				);
+			},
+		});
 
 		this.registerEvent(
 			this.app.workspace.on('editor-menu', (menu, editor, ctx) => {
-				if (editor.getSelection() === '') return;
+				const hasSelection = editor.getSelection() !== '';
 				menu.addItem((item) =>
 					item
-						.setTitle('Annotate selection')
-						.setIcon('highlighter')
+						.setTitle(hasSelection ? 'Annotate selection' : 'Insert comment')
+						.setIcon(hasSelection ? 'highlighter' : 'message-square')
 						.onClick(() => {
-							this.promptAnnotate(editor, ctx);
-						}),
-				);
-				menu.addItem((item) =>
-					item
-						.setTitle('Comment on selection')
-						.setIcon('message-square')
-						.onClick(() => {
-							this.promptComment(editor, ctx);
+							this.annotateOrComment(editor, ctx);
 						}),
 				);
 			}),
@@ -149,7 +165,7 @@ export default class MdAnnotationPlugin extends Plugin {
 		this.diskTimers.clear();
 		// Persist anything still debouncing, then stop the queue.
 		void this.queue.flush().finally(() => this.queue.dispose());
-		// Remove any highlight spans still in rendered previews (render
+		// Remove any highlight spans/markers still in rendered previews (render
 		// children belong to the renderer's lifecycle, not the plugin's, so
 		// they would otherwise linger until the next re-render). Sweeping via
 		// leaves also covers popout windows.
@@ -280,7 +296,9 @@ export default class MdAnnotationPlugin extends Plugin {
 		if (path === null) return;
 		const state = this.states.get(path);
 		if (!state) return;
-		applyEditorDecorations(view, state.annotations, state.outcomes, this.settings);
+		applyEditorDecorations(view, state.annotations, state.outcomes, this.settings, () => {
+			void this.activateSidebar();
+		});
 	}
 
 	private decorateAllFor(path: string): void {
@@ -300,25 +318,27 @@ export default class MdAnnotationPlugin extends Plugin {
 
 	// ── Annotation CRUD (used by commands and the sidebar) ───────────────────
 
-	private promptAnnotate(editor: Editor, ctx: MarkdownView | MarkdownFileInfo): void {
-		const formats = this.settings.formats;
-		const first = formats[0];
-		if (formats.length === 1 && first) {
-			this.addAnnotationFromEditor(editor, ctx, 'highlight', first.id);
-			return;
-		}
-		new FormatSuggestModal(this.app, formats, (format) => {
-			this.addAnnotationFromEditor(editor, ctx, 'highlight', format.id);
-		}).open();
-	}
-
-	private promptComment(editor: Editor, ctx: MarkdownView | MarkdownFileInfo): void {
-		if (!this.settings.commentUseAnnotationFormats) {
+	// Selection → annotation (highlight, format picked when several exist);
+	// no selection → comment marker at the cursor.
+	private annotateOrComment(editor: Editor, ctx: MarkdownView | MarkdownFileInfo): void {
+		const from = editor.posToOffset(editor.getCursor('from'));
+		const to = editor.posToOffset(editor.getCursor('to'));
+		if (from === to) {
 			this.addAnnotationFromEditor(editor, ctx, 'comment', '');
 			return;
 		}
-		new FormatSuggestModal(this.app, this.settings.formats, (format) => {
-			this.addAnnotationFromEditor(editor, ctx, 'comment', format.id);
+		const names = usableFormatNames(this.settings);
+		const first = names[0];
+		if (names.length === 0) {
+			new Notice('No annotation formats are enabled — check the plugin settings');
+			return;
+		}
+		if (names.length === 1 && first !== undefined) {
+			this.addAnnotationFromEditor(editor, ctx, 'highlight', first);
+			return;
+		}
+		new FormatSuggestModal(this.app, names, (name) => {
+			this.addAnnotationFromEditor(editor, ctx, 'highlight', name);
 		}).open();
 	}
 
@@ -326,13 +346,13 @@ export default class MdAnnotationPlugin extends Plugin {
 		editor: Editor,
 		ctx: MarkdownView | MarkdownFileInfo,
 		type: AnnotationType,
-		formatId: string,
+		formatName: string,
 	): void {
 		const path = ctx.file?.path;
 		if (path === undefined) return;
 		const from = editor.posToOffset(editor.getCursor('from'));
 		const to = editor.posToOffset(editor.getCursor('to'));
-		if (from === to) {
+		if (from === to && type !== 'comment') {
 			new Notice('Select some text to annotate');
 			return;
 		}
@@ -344,10 +364,14 @@ export default class MdAnnotationPlugin extends Plugin {
 		}
 
 		const selector = captureSelector(body, from, to);
+		if (from === to && selector.prefix === '' && selector.suffix === '') {
+			new Notice('Cannot anchor a comment in an empty note');
+			return;
+		}
 		const annotation = createAnnotation({
 			id: generateAnnotationId(Date.now(), Math.random()),
 			type,
-			format: formatId,
+			format: formatName,
 			selector,
 			comment: '',
 			author: this.settings.author,
@@ -383,6 +407,56 @@ export default class MdAnnotationPlugin extends Plugin {
 			dateClosed: status === 'closed' ? now : null,
 			dateModified: now,
 		});
+	}
+
+	// Reassign one annotation to a different format (sidebar dropdown).
+	setFormat(path: string, id: string, formatName: string): void {
+		this.patchAnnotation(path, id, {
+			format: formatName,
+			dateModified: formatTimestamp(Date.now()),
+		});
+		this.decorateAllFor(path);
+		this.rerenderPreviews();
+	}
+
+	// Rename a format in settings AND rewrite the "format" field in every
+	// annotated note that references the old name (they store the name).
+	async renameFormat(oldName: string, newName: string): Promise<boolean> {
+		const styles = this.settings.formatStyles;
+		const current = styles[oldName];
+		if (!current) return false;
+		if (newName === '' || isUnsafeKey(newName) || styles[newName]) return false;
+
+		// Move the key while preserving the display order.
+		const next: Record<string, typeof current> = {};
+		for (const [key, value] of Object.entries(styles)) {
+			next[key === oldName ? newName : key] = value;
+		}
+		this.settings.formatStyles = next;
+		await this.saveSettings();
+
+		let fileCount = 0;
+		for (const file of this.app.vault.getMarkdownFiles()) {
+			const doc = await this.app.vault.cachedRead(file);
+			if (!doc.includes(BLOCK_OPEN)) continue;
+			const { annotations } = parseDocument(doc);
+			if (!annotations.some((a) => a.format === oldName)) continue;
+			this.queue.request(file.path, (text) => renameAnnotationFormat(text, oldName, newName));
+			fileCount++;
+			const state = this.states.get(file.path);
+			if (state) {
+				for (const a of state.annotations) {
+					if (a.format === oldName) a.format = newName;
+				}
+			}
+		}
+		if (fileCount > 0) {
+			new Notice(
+				`MD Annotation: renamed format in ${fileCount} note${fileCount === 1 ? '' : 's'}`,
+			);
+			this.notifyChange();
+		}
+		return true;
 	}
 
 	reanchorFromSelection(path: string, id: string): void {
@@ -473,6 +547,11 @@ export default class MdAnnotationPlugin extends Plugin {
 		const to = editor.offsetToPos(outcome.end);
 		editor.setSelection(from, to);
 		editor.scrollIntoView({ from, to }, true);
+	}
+
+	// ReadingHost surface (marker clicks open the sidebar).
+	openSidebar(): void {
+		void this.activateSidebar();
 	}
 
 	async activateSidebar(): Promise<void> {
