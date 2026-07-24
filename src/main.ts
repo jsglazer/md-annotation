@@ -61,10 +61,13 @@ export default class MdAnnotationPlugin extends Plugin {
 	// to the nearest entry.
 	private syncEnabled = false;
 	private syncTimer: number | null = null;
+	// Format names that currently have a generated "Apply - <name>" command, so
+	// syncFormatCommands can diff against settings and add/remove as they change.
+	private formatCommandNames = new Set<string>();
 
 	async onload(): Promise<void> {
 		this.settings = normalizeSettings(await this.loadData());
-		this.api = createApi(this.app.vault);
+		this.api = createApi(this.app.vault, () => Object.keys(this.settings.formatStyles));
 
 		this.queue = new WriteQueue(
 			{
@@ -153,6 +156,9 @@ export default class MdAnnotationPlugin extends Plugin {
 			},
 		});
 
+		// One "Apply - <name>" command per format, kept in sync as formats change.
+		this.syncFormatCommands();
+
 		this.registerEvent(
 			this.app.workspace.on('editor-menu', (menu, editor, ctx) => {
 				const hasSelection = editor.getSelection() !== '';
@@ -217,9 +223,61 @@ export default class MdAnnotationPlugin extends Plugin {
 
 	async saveSettings(): Promise<void> {
 		await this.saveData(this.settings);
+		// A format may have been added, renamed, or deleted — reconcile commands.
+		this.syncFormatCommands();
 		for (const view of this.editors) this.decorate(view);
 		this.rerenderPreviews();
 		this.notifyChange();
+	}
+
+	// ── Per-format commands ("Apply - <name>", one per format) ───────────────
+	//
+	// Registered dynamically so a format added in the settings tab immediately
+	// gains its own command — which also lets a Note Toolbar JavaScript item
+	// build a live "apply format" menu via ntb.menu() (see README). Removed or
+	// renamed formats have their stale command torn down. addCommand prefixes
+	// the id with the plugin id; removeCommand needs that full prefixed id.
+	private formatCommandId(formatName: string): string {
+		return `apply-${formatName}`;
+	}
+
+	private syncFormatCommands(): void {
+		const current = new Set(Object.keys(this.settings.formatStyles));
+		for (const name of current) {
+			if (this.formatCommandNames.has(name)) continue;
+			this.addCommand({
+				id: this.formatCommandId(name),
+				name: `Apply - ${name}`,
+				icon: 'highlighter',
+				editorCheckCallback: (checking, editor, ctx) => {
+					// Offered only while the format still exists (guards the brief
+					// window between a delete and the next sync).
+					if (!this.settings.formatStyles[name]) return false;
+					if (checking) return true;
+					this.applyNamedFormat(editor, ctx, name);
+					return true;
+				},
+			});
+			this.formatCommandNames.add(name);
+		}
+		for (const name of [...this.formatCommandNames]) {
+			if (current.has(name)) continue;
+			this.removeCommand(`${this.manifest.id}:${this.formatCommandId(name)}`);
+			this.formatCommandNames.delete(name);
+		}
+	}
+
+	// Selection → highlight with this format; bare cursor → comment carrying it
+	// (the marker then renders in that format's color).
+	private applyNamedFormat(
+		editor: Editor,
+		ctx: MarkdownView | MarkdownFileInfo,
+		formatName: string,
+	): void {
+		const from = editor.posToOffset(editor.getCursor('from'));
+		const to = editor.posToOffset(editor.getCursor('to'));
+		const type: AnnotationType = from === to ? 'comment' : 'highlight';
+		this.addAnnotationFromEditor(editor, ctx, type, formatName);
 	}
 
 	// ── Per-file state ───────────────────────────────────────────────────────

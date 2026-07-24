@@ -35,14 +35,31 @@ export interface MdAnnotationAPI {
 	getAnnotations(path: string): Promise<Annotation[]>;
 	// Every annotated markdown file in the vault with its annotations.
 	getAllAnnotations(): Promise<FileAnnotations[]>;
+	// The current format names, in settings order. Handy for building a Note
+	// Toolbar menu without having to scrape command ids (see README).
+	getFormatNames(): string[];
+	// The Obsidian command id that applies a given format (e.g.
+	// 'md-annotation:apply-EditThis'). Returns null for an unknown format.
+	getFormatCommandId(formatName: string): string | null;
 }
 
 function clone<T>(v: T): T {
 	return structuredClone(v);
 }
 
-export function createApi(vault: Vault): MdAnnotationAPI {
+// Kept in sync with main.ts's per-format command registration.
+export const FORMAT_COMMAND_PREFIX = 'md-annotation:apply-';
+
+export function createApi(vault: Vault, getFormatNames: () => string[]): MdAnnotationAPI {
 	return {
+		getFormatNames,
+
+		getFormatCommandId(formatName: string): string | null {
+			return getFormatNames().includes(formatName)
+				? `${FORMAT_COMMAND_PREFIX}${formatName}`
+				: null;
+		},
+
 		async getAnnotations(path: string): Promise<Annotation[]> {
 			const file = vault.getFileByPath(path);
 			if (!file || file.extension !== 'md') return [];

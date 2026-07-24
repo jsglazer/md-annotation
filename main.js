@@ -216,8 +216,13 @@ function removeUnparseableLine(doc, raw) {
 function clone(v) {
   return structuredClone(v);
 }
-function createApi(vault) {
+var FORMAT_COMMAND_PREFIX = "md-annotation:apply-";
+function createApi(vault, getFormatNames) {
   return {
+    getFormatNames,
+    getFormatCommandId(formatName) {
+      return getFormatNames().includes(formatName) ? `${FORMAT_COMMAND_PREFIX}${formatName}` : null;
+    },
     async getAnnotations(path) {
       const file = vault.getFileByPath(path);
       if (!file || file.extension !== "md") return [];
@@ -1832,10 +1837,13 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
     // to the nearest entry.
     this.syncEnabled = false;
     this.syncTimer = null;
+    // Format names that currently have a generated "Apply - <name>" command, so
+    // syncFormatCommands can diff against settings and add/remove as they change.
+    this.formatCommandNames = /* @__PURE__ */ new Set();
   }
   async onload() {
     this.settings = normalizeSettings(await this.loadData());
-    this.api = createApi(this.app.vault);
+    this.api = createApi(this.app.vault, () => Object.keys(this.settings.formatStyles));
     this.queue = new WriteQueue(
       {
         process: async (path, mutate) => {
@@ -1918,6 +1926,7 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
         );
       }
     });
+    this.syncFormatCommands();
     this.registerEvent(
       this.app.workspace.on("editor-menu", (menu, editor, ctx) => {
         const hasSelection = editor.getSelection() !== "";
@@ -1971,9 +1980,51 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
   }
   async saveSettings() {
     await this.saveData(this.settings);
+    this.syncFormatCommands();
     for (const view of this.editors) this.decorate(view);
     this.rerenderPreviews();
     this.notifyChange();
+  }
+  // ── Per-format commands ("Apply - <name>", one per format) ───────────────
+  //
+  // Registered dynamically so a format added in the settings tab immediately
+  // gains its own command — which also lets a Note Toolbar JavaScript item
+  // build a live "apply format" menu via ntb.menu() (see README). Removed or
+  // renamed formats have their stale command torn down. addCommand prefixes
+  // the id with the plugin id; removeCommand needs that full prefixed id.
+  formatCommandId(formatName) {
+    return `apply-${formatName}`;
+  }
+  syncFormatCommands() {
+    const current = new Set(Object.keys(this.settings.formatStyles));
+    for (const name of current) {
+      if (this.formatCommandNames.has(name)) continue;
+      this.addCommand({
+        id: this.formatCommandId(name),
+        name: `Apply - ${name}`,
+        icon: "highlighter",
+        editorCheckCallback: (checking, editor, ctx) => {
+          if (!this.settings.formatStyles[name]) return false;
+          if (checking) return true;
+          this.applyNamedFormat(editor, ctx, name);
+          return true;
+        }
+      });
+      this.formatCommandNames.add(name);
+    }
+    for (const name of [...this.formatCommandNames]) {
+      if (current.has(name)) continue;
+      this.removeCommand(`${this.manifest.id}:${this.formatCommandId(name)}`);
+      this.formatCommandNames.delete(name);
+    }
+  }
+  // Selection → highlight with this format; bare cursor → comment carrying it
+  // (the marker then renders in that format's color).
+  applyNamedFormat(editor, ctx, formatName) {
+    const from = editor.posToOffset(editor.getCursor("from"));
+    const to = editor.posToOffset(editor.getCursor("to"));
+    const type = from === to ? "comment" : "highlight";
+    this.addAnnotationFromEditor(editor, ctx, type, formatName);
   }
   // ── Per-file state ───────────────────────────────────────────────────────
   getState(path) {
