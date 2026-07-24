@@ -37,6 +37,34 @@ body.theme-dark .mdann-marker {
 	height: 0.9em;
 }
 
+/* Sequential comment number shown next to the marker icon */
+.mdann-marker-num {
+	font-size: 0.7em;
+	font-weight: var(--font-bold);
+	line-height: 1;
+	margin-left: 1px;
+}
+
+/* Brief flash on annotated text / marker when its sidebar entry activates */
+.mdann-flash-text {
+	animation: mdann-flash-text 1.2s ease-out;
+}
+
+@keyframes mdann-flash-text {
+	0% {
+		outline: 2px solid var(--interactive-accent);
+		outline-offset: 1px;
+	}
+	100% {
+		outline: 2px solid transparent;
+		outline-offset: 1px;
+	}
+}
+
+.mdann-hl-clickable {
+	cursor: pointer;
+}
+
 .mdann-marker-plain,
 body.theme-dark .mdann-marker-plain {
 	color: var(--text-muted);
@@ -81,14 +109,52 @@ body.theme-dark .mdann-marker-plain {
 	border-color: var(--text-error);
 }
 
+.mdann-card-clickable {
+	cursor: pointer;
+}
+
+.mdann-card-clickable:hover {
+	border-color: var(--interactive-accent);
+}
+
+/* The entry currently synced/revealed from the note */
+.mdann-card-active {
+	border-color: var(--interactive-accent);
+	box-shadow: 0 0 0 1px var(--interactive-accent);
+}
+
+/* Brief pulse when an entry is revealed from a click in the note */
+.mdann-flash {
+	animation: mdann-flash 1.2s ease-out;
+}
+
+@keyframes mdann-flash {
+	0% {
+		background: var(--text-selection);
+	}
+	100% {
+		background: var(--background-primary);
+	}
+}
+
+/* Comment number badge in the sidebar entry */
+.mdann-card-num {
+	display: inline-block;
+	min-width: 1.4em;
+	padding: 0 4px;
+	margin-right: 5px;
+	border-radius: 8px;
+	background: var(--background-modifier-border);
+	color: var(--text-muted);
+	font-size: 0.8em;
+	font-weight: var(--font-bold);
+	text-align: center;
+}
+
 .mdann-quote {
 	margin-bottom: var(--size-4-1);
 	line-height: 1.4;
 	word-break: break-word;
-}
-
-.mdann-quote-clickable {
-	cursor: pointer;
 }
 
 .mdann-orphan-reason {

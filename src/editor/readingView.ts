@@ -14,6 +14,7 @@ import type { MarkdownPostProcessorContext, MarkdownSectionInformation } from 'o
 import { MarkdownRenderChild, setIcon } from 'obsidian';
 
 import { captureSelector, resolveSelector } from '../core/matcher';
+import { numberComments } from '../core/ordering';
 import type { MdAnnotationSettings } from '../core/settings';
 import {
 	HIGHLIGHT_CLASS,
@@ -28,7 +29,9 @@ import type { FileAnnotationState } from '../state';
 export interface ReadingHost {
 	settings: MdAnnotationSettings;
 	ensureFileState(path: string): Promise<FileAnnotationState | null>;
-	openSidebar(): void;
+	// Annotated text (highlight span or comment marker) was clicked in Reading
+	// view — reveal and focus the matching sidebar entry.
+	revealAnnotation(path: string, id: string): void;
 }
 
 interface TextSlice {
@@ -91,12 +94,13 @@ class HighlightRenderChild extends MarkdownRenderChild {
 		classes: string,
 		styleVars: Record<string, string>,
 		annotationId: string,
+		onClick: () => void,
 	): void {
 		const { text, slices } = collectTextSlices(this.containerEl);
 		if (text === '') return;
 		const result = resolveSelector(text, selector);
 		if (result.status !== 'matched') return;
-		this.wrapRange(slices, result.start, result.end, classes, styleVars, annotationId);
+		this.wrapRange(slices, result.start, result.end, classes, styleVars, annotationId, onClick);
 	}
 
 	// Resolve a point selector (empty quote) against the rendered text and
@@ -106,6 +110,7 @@ class HighlightRenderChild extends MarkdownRenderChild {
 		classes: string,
 		styleVars: Record<string, string>,
 		annotationId: string,
+		label: string,
 		onClick: () => void,
 	): void {
 		const { text, slices } = collectTextSlices(this.containerEl);
@@ -120,6 +125,12 @@ class HighlightRenderChild extends MarkdownRenderChild {
 		span.setAttribute('data-mdann-id', annotationId);
 		span.setCssProps(styleVars);
 		setIcon(span, 'message-square');
+		if (label !== '') {
+			const num = doc.createElement('span');
+			num.className = 'mdann-marker-num';
+			num.textContent = label;
+			span.appendChild(num);
+		}
 		span.addEventListener('click', (e) => {
 			e.preventDefault();
 			onClick();
@@ -142,6 +153,7 @@ class HighlightRenderChild extends MarkdownRenderChild {
 		classes: string,
 		styleVars: Record<string, string>,
 		annotationId: string,
+		onClick: () => void,
 	): void {
 		const doc = this.containerEl.ownerDocument;
 		for (const slice of slices) {
@@ -157,9 +169,10 @@ class HighlightRenderChild extends MarkdownRenderChild {
 			if (localTo - localFrom < target.length) target.splitText(localTo - localFrom);
 
 			const span = doc.createElement('span');
-			span.className = classes;
+			span.className = classes + ' mdann-hl-clickable';
 			span.setAttribute('data-mdann-id', annotationId);
 			span.setCssProps(styleVars);
+			span.addEventListener('click', () => onClick());
 			target.parentNode?.insertBefore(span, target);
 			span.appendChild(target);
 			this.spans.push(span);
@@ -224,6 +237,7 @@ export function createReadingPostProcessor(host: ReadingHost) {
 		}
 
 		const settings = host.settings;
+		const commentNumbers = numberComments(state.annotations, state.outcomes);
 		const child = new HighlightRenderChild(el);
 		for (const annotation of candidates) {
 			const outcome = state.outcomes.get(annotation.id);
@@ -236,12 +250,14 @@ export function createReadingPostProcessor(host: ReadingHost) {
 				// Point comment marker.
 				if (annotation.type !== 'comment' || settings.commentsHiddenEnabled) continue;
 				const styled = settings.commentsFormattingEnabled;
+				const number = commentNumbers.get(annotation.id);
 				child.tryMarker(
 					selector,
 					markerClasses() + (styled ? '' : ' mdann-marker-plain'),
 					styled ? highlightStyleVars(annotation.type, annotation.format, settings) : {},
 					annotation.id,
-					() => host.openSidebar(),
+					number !== undefined ? String(number) : '',
+					() => host.revealAnnotation(ctx.sourcePath, annotation.id),
 				);
 				continue;
 			}
@@ -252,6 +268,7 @@ export function createReadingPostProcessor(host: ReadingHost) {
 				highlightClasses(annotation.type, annotation.format, settings),
 				highlightStyleVars(annotation.type, annotation.format, settings),
 				annotation.id,
+				() => host.revealAnnotation(ctx.sourcePath, annotation.id),
 			);
 		}
 		if (child.spanCount > 0) ctx.addChild(child);

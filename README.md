@@ -32,11 +32,13 @@ The two are distinguished by whether text is selected when you run the single **
 ## Features
 
 - **Highlights** with unlimited custom formats — per-format Use toggle, font/background colors (each with its own enable checkbox) per light/dark theme, and an optional font size
-- **Point comments** — a marker icon at any spot in the text, no selection needed; styled by the dedicated comment format
-- **Sidebar** listing every annotation of the active note: jump to a highlight, edit comments, **reassign an annotation to a different format** via a dropdown, open/close status, delete
+- **Point comments** — a **numbered** marker icon at any spot in the text, no selection needed; styled by the dedicated comment format or any annotation format
+- **Sidebar** listing every annotation of the active note: **click an entry to jump to it in the text**, edit comments, **reassign an annotation (or comment) to a different format** via a dropdown, open/close status, delete (with confirmation)
+- **Two-way navigation** — click annotated text or a comment marker to jump to its sidebar entry (and focus its comment box); on open the sidebar scrolls to the entry nearest the cursor
+- **Text ⇄ sidebar sync** — an optional mode (command **Sync text and sidebar**) that keeps the sidebar tracking the entry nearest the cursor as you move through the note
 - **Show/hide formatting** on demand — commands and settings toggles to hide annotation colors, comment colors, or comment markers entirely
 - **Format renames propagate** — rename a format in settings and every note referencing the old name is rewritten automatically
-- **Queryable from Dataview / Datacore** — a public JS API for `dataviewjs` / `datacorejs` blocks (see below)
+- **Queryable from Dataview / Datacore** — a public JS API for `dataviewjs` / `datacorejs` / `datacorejsx` blocks (see below)
 - **Orphan repair** — orphaned annotations are flagged; select the new text and re-anchor with one click
 - **Metadata** on every annotation: author (from settings), status, created / modified / closed timestamps
 - **Mobile support** — no desktop-only APIs
@@ -48,6 +50,7 @@ The two are distinguished by whether text is selected when you run the single **
 | **Annotate** | Selection → highlight it (pick a format if more than one is enabled); no selection → insert a comment marker at the cursor |
 | **Show/hide annotation formats** | Toggle highlight colors on annotated text |
 | **Show/hide comment formats** | Toggle colors on comment markers |
+| **Sync text and sidebar** | Toggle continuous syncing of the sidebar to the entry nearest the cursor |
 | **Open annotation sidebar** | Open the annotations panel |
 
 The Annotate action is also in the editor context menu — shown as *Annotate selection* or *Insert comment* depending on whether text is selected.
@@ -62,19 +65,67 @@ Settings are organized into **General / Annotations / Comments** tabs:
 
 ## Querying with Dataview / Datacore
 
-The annotation block is line-delimited JSON, so plain DQL can't read it — instead the plugin exposes a stable API for `dataviewjs` / `datacorejs` blocks:
+The annotation block is line-delimited JSON, so **plain DQL (` ```dataview ` ) can't read it** — there are no frontmatter or inline fields to query. Instead the plugin exposes a stable JS API reachable from any script block:
 
 ```js
 const api = app.plugins.plugins['md-annotation'].api;
-const anns = await api.getAnnotations(dv.current().file.path); // one note
-const all  = await api.getAllAnnotations();                    // whole vault
-
-dv.table(['Quote', 'Format', 'Comment', 'Author', 'Created'],
-  anns.filter(a => a.status === 'open')
-      .map(a => [a.selector.exact, a.format, a.comment, a.author, a.dateCreate]));
+await api.getAnnotations(path);   // Annotation[] for one note
+await api.getAllAnnotations();    // [{ path, annotations }] for the whole vault
 ```
 
-Returned objects are deep copies — mutate them freely without touching plugin state or note data.
+Each `Annotation` has `id`, `type` (`'highlight'` | `'comment'`), `format`, `selector` (`{ exact, prefix, suffix }`), `comment`, `author`, `status` (`'open'` | `'closed'`), and `dateCreate` / `dateModified` / `dateClosed`. Returned objects are deep copies — mutate them freely without touching plugin state or note data.
+
+### DataviewJS
+
+```dataviewjs
+const api = app.plugins.plugins['md-annotation'].api;
+const anns = await api.getAnnotations(dv.current().file.path);
+dv.table(['Quote', 'Format', 'Comment', 'Author', 'Created'],
+  anns.filter(a => a.status === 'open')
+      .map(a => [a.selector.exact || '(comment)', a.format || 'Comment', a.comment, a.author, a.dateCreate.slice(0, 10)]));
+```
+
+Vault-wide — every open annotation across all notes:
+
+```dataviewjs
+const api = app.plugins.plugins['md-annotation'].api;
+const files = await api.getAllAnnotations();
+dv.table(['Note', 'Type', 'Quote / Comment', 'Format'],
+  files.flatMap(f => f.annotations
+    .filter(a => a.status === 'open')
+    .map(a => [dv.fileLink(f.path), a.type, a.selector.exact || a.comment, a.format || 'Comment'])));
+```
+
+### DatacoreJS
+
+```datacorejs
+const api = app.plugins.plugins['md-annotation'].api;
+const anns = await api.getAnnotations(dc.currentPath());
+return dc.table(
+  ['Quote', 'Format', 'Comment', 'Status'],
+  anns.map(a => [a.selector.exact || '(comment)', a.format || 'Comment', a.comment, a.status]),
+);
+```
+
+### DatacoreJSX
+
+```datacorejsx
+function Annotations() {
+  const api = app.plugins.plugins['md-annotation'].api;
+  const [anns, setAnns] = dc.useState([]);
+  dc.useEffect(() => { api.getAnnotations(dc.currentPath()).then(setAnns); }, []);
+  return (
+    <dc.Group>
+      {anns.map(a => (
+        <div key={a.id}>
+          <b>{a.format || 'Comment'}</b>: {a.selector.exact || a.comment} <i>({a.status})</i>
+        </div>
+      ))}
+    </dc.Group>
+  );
+}
+return <Annotations />;
+```
 
 ## Install (manual)
 

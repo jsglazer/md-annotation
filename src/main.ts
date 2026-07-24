@@ -19,6 +19,7 @@ import {
 	upsertAnnotation,
 } from './core/block';
 import { captureSelector, resolveSelectors } from './core/matcher';
+import { nearestAnnotationId } from './core/ordering';
 import { WriteQueue } from './core/queue';
 import type { MdAnnotationSettings } from './core/settings';
 import { isUnsafeKey, normalizeSettings, usableFormatNames } from './core/settings';
@@ -36,6 +37,8 @@ import { AnnotationSidebarView, SIDEBAR_VIEW_TYPE } from './ui/sidebar';
 
 const WRITE_DEBOUNCE_MS = 500;
 const DISK_REFRESH_DEBOUNCE_MS = 400;
+const SYNC_DEBOUNCE_MS = 150;
+const TEXT_FLASH_MS = 1200;
 
 export default class MdAnnotationPlugin extends Plugin {
 	settings: MdAnnotationSettings = normalizeSettings(null);
@@ -48,6 +51,16 @@ export default class MdAnnotationPlugin extends Plugin {
 	private editorTimers = new Map<EditorView, number>();
 	private diskTimers = new Map<string, number>();
 	private changeListeners = new Set<() => void>();
+	// A one-shot request the sidebar consumes on its next render: scroll to
+	// (and optionally flash/focus) the entry for `id`.
+	private pendingReveal: { path: string; id: string; flash: boolean; focus: boolean } | null = null;
+	// Paths whose already-rendered Reading view has been re-rendered once after
+	// annotations first loaded (fixes formatting not appearing until a toggle).
+	private initialRendered = new Set<string>();
+	// "Sync text and sidebar" toggle: when on, cursor moves scroll the sidebar
+	// to the nearest entry.
+	private syncEnabled = false;
+	private syncTimer: number | null = null;
 
 	async onload(): Promise<void> {
 		this.settings = normalizeSettings(await this.loadData());
@@ -82,6 +95,7 @@ export default class MdAnnotationPlugin extends Plugin {
 		this.addCommand({
 			id: 'annotate',
 			name: 'Annotate',
+			icon: 'highlighter',
 			editorCallback: (editor, ctx) => {
 				this.annotateOrComment(editor, ctx);
 			},
@@ -89,8 +103,31 @@ export default class MdAnnotationPlugin extends Plugin {
 		this.addCommand({
 			id: 'open-sidebar',
 			name: 'Open annotation sidebar',
+			icon: 'panel-right',
 			callback: () => {
 				void this.activateSidebar();
+			},
+		});
+		this.addCommand({
+			id: 'toggle-sync',
+			name: 'Sync text and sidebar',
+			icon: 'arrow-left-right',
+			callback: () => {
+				this.syncEnabled = !this.syncEnabled;
+				new Notice(`Text/sidebar sync ${this.syncEnabled ? 'on' : 'off'}`);
+				if (this.syncEnabled && this.hasSidebar()) {
+					const file = this.activeMarkdownFile();
+					if (file) {
+						const nearest = this.nearestToCursor(file.path);
+						if (nearest) {
+							void this.revealInSidebar(file.path, nearest, {
+								flash: false,
+								focus: false,
+								activate: false,
+							});
+						}
+					}
+				}
 			},
 		});
 		this.addCommand({
@@ -163,6 +200,10 @@ export default class MdAnnotationPlugin extends Plugin {
 		this.editorTimers.clear();
 		for (const timer of this.diskTimers.values()) window.clearTimeout(timer);
 		this.diskTimers.clear();
+		if (this.syncTimer !== null) {
+			window.clearTimeout(this.syncTimer);
+			this.syncTimer = null;
+		}
 		// Persist anything still debouncing, then stop the queue.
 		void this.queue.flush().finally(() => this.queue.dispose());
 		// Remove any highlight spans/markers still in rendered previews (render
@@ -193,7 +234,28 @@ export default class MdAnnotationPlugin extends Plugin {
 		const file = this.app.vault.getFileByPath(path);
 		if (!file || file.extension !== 'md') return null;
 		const doc = await this.app.vault.cachedRead(file);
-		return this.setStateFromDoc(path, doc);
+		const state = this.setStateFromDoc(path, doc);
+		// The Reading view's post-processor may have already rendered this note
+		// before its annotations were parsed (so nothing was highlighted). Now
+		// that state exists, re-render the preview once so formatting appears
+		// without needing a manual toggle.
+		this.scheduleInitialPreviewRender(path);
+		return state;
+	}
+
+	private scheduleInitialPreviewRender(path: string): void {
+		if (this.initialRendered.has(path)) return;
+		this.initialRendered.add(path);
+		window.setTimeout(() => this.rerenderPreviewsForPath(path), 0);
+	}
+
+	private rerenderPreviewsForPath(path: string): void {
+		for (const leaf of this.app.workspace.getLeavesOfType('markdown')) {
+			const view = leaf.view;
+			if (view instanceof MarkdownView && view.getMode() === 'preview' && view.file?.path === path) {
+				view.previewMode.rerender(true);
+			}
+		}
 	}
 
 	// Parse + resolve one document snapshot, persist self-healed selectors,
@@ -296,8 +358,8 @@ export default class MdAnnotationPlugin extends Plugin {
 		if (path === null) return;
 		const state = this.states.get(path);
 		if (!state) return;
-		applyEditorDecorations(view, state.annotations, state.outcomes, this.settings, () => {
-			void this.activateSidebar();
+		applyEditorDecorations(view, state.annotations, state.outcomes, this.settings, (id) => {
+			this.revealAnnotation(path, id);
 		});
 	}
 
@@ -547,11 +609,86 @@ export default class MdAnnotationPlugin extends Plugin {
 		const to = editor.offsetToPos(outcome.end);
 		editor.setSelection(from, to);
 		editor.scrollIntoView({ from, to }, true);
+		this.flashInText(id);
 	}
 
-	// ReadingHost surface (marker clicks open the sidebar).
-	openSidebar(): void {
-		void this.activateSidebar();
+	// ── Text ⇄ sidebar reveal / sync ─────────────────────────────────────────
+
+	// Called when annotated text or a comment marker is clicked in the editor or
+	// Reading view: open the sidebar, scroll to the entry, flash it, and focus
+	// its comment box (Update001 "jump the cursor to the Comment text box").
+	revealAnnotation(path: string, id: string): void {
+		void this.revealInSidebar(path, id, { flash: true, focus: true, activate: true });
+	}
+
+	// Cursor moved in an editor — when sync is on and the sidebar is open, scroll
+	// it to the nearest entry.
+	onEditorSelectionChange(view: EditorView): void {
+		if (!this.syncEnabled) return;
+		const path = editorViewPath(view);
+		if (path === null || !this.hasSidebar()) return;
+		const offset = view.state.selection.main.head;
+		if (this.syncTimer !== null) window.clearTimeout(this.syncTimer);
+		this.syncTimer = window.setTimeout(() => {
+			this.syncTimer = null;
+			const state = this.states.get(path);
+			if (!state) return;
+			const id = nearestAnnotationId(state.annotations, state.outcomes, offset);
+			if (id) void this.revealInSidebar(path, id, { flash: false, focus: false, activate: false });
+		}, SYNC_DEBOUNCE_MS);
+	}
+
+	// The matched entry nearest the active editor's cursor (used to scroll the
+	// sidebar on open and when sync is switched on).
+	nearestToCursor(path: string): string | null {
+		const state = this.states.get(path);
+		if (!state) return null;
+		let offset = 0;
+		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+		if (view && view.file?.path === path) {
+			offset = view.editor.posToOffset(view.editor.getCursor('head'));
+		}
+		return nearestAnnotationId(state.annotations, state.outcomes, offset);
+	}
+
+	private async revealInSidebar(
+		path: string,
+		id: string,
+		opts: { flash: boolean; focus: boolean; activate: boolean },
+	): Promise<void> {
+		this.pendingReveal = { path, id, flash: opts.flash, focus: opts.focus };
+		// Only an explicit click from the note brings the sidebar to the front;
+		// passive sync/open scrolling must not steal the right panel.
+		if (opts.activate) await this.activateSidebar();
+		// A newly created sidebar renders in onOpen and consumes the request;
+		// an already-open one needs a nudge.
+		this.notifyChange();
+	}
+
+	consumePendingReveal(path: string): { id: string; flash: boolean; focus: boolean } | null {
+		const reveal = this.pendingReveal;
+		if (reveal && reveal.path === path) {
+			this.pendingReveal = null;
+			return { id: reveal.id, flash: reveal.flash, focus: reveal.focus };
+		}
+		return null;
+	}
+
+	private hasSidebar(): boolean {
+		return this.app.workspace.getLeavesOfType(SIDEBAR_VIEW_TYPE).length > 0;
+	}
+
+	// Briefly highlight every rendered occurrence of an annotation in the note
+	// (Update001 "Flash … Comment icon … when SB entry is active").
+	private flashInText(id: string): void {
+		const selector = `[data-mdann-id="${CSS.escape(id)}"]`;
+		this.app.workspace.iterateAllLeaves((leaf) => {
+			for (const el of Array.from(leaf.view.containerEl.querySelectorAll(selector))) {
+				const node = el as HTMLElement;
+				node.addClass('mdann-flash-text');
+				window.setTimeout(() => node.removeClass('mdann-flash-text'), TEXT_FLASH_MS);
+			}
+		});
 	}
 
 	async activateSidebar(): Promise<void> {

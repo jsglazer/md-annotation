@@ -15,6 +15,7 @@ import type { DecorationSet } from '@codemirror/view';
 import { editorInfoField, setIcon } from 'obsidian';
 
 import type { MatchResult } from '../core/matcher';
+import { numberComments } from '../core/ordering';
 import type { MdAnnotationSettings } from '../core/settings';
 import {
 	highlightClasses,
@@ -47,6 +48,11 @@ export interface EditorHost {
 	attachEditor(view: EditorView): void;
 	detachEditor(view: EditorView): void;
 	scheduleEditorResolve(view: EditorView, delayMs: number): void;
+	// Annotated text (highlight span or comment marker) was clicked in the
+	// editor — reveal and focus the matching sidebar entry.
+	revealAnnotation(path: string, id: string): void;
+	// The cursor/selection moved — used by the "Sync text and sidebar" toggle.
+	onEditorSelectionChange(view: EditorView): void;
 }
 
 export const EDITOR_RESOLVE_DEBOUNCE_MS = 250;
@@ -59,8 +65,13 @@ export function buildEditorExtension(host: EditorHost): Extension {
 				host.scheduleEditorResolve(view, 0);
 			}
 
-			update(update: { docChanged: boolean; view: EditorView }): void {
+			update(update: {
+				docChanged: boolean;
+				selectionSet: boolean;
+				view: EditorView;
+			}): void {
 				if (update.docChanged) host.scheduleEditorResolve(update.view, EDITOR_RESOLVE_DEBOUNCE_MS);
+				else if (update.selectionSet) host.onEditorSelectionChange(update.view);
 			}
 
 			destroy(): void {
@@ -68,7 +79,19 @@ export function buildEditorExtension(host: EditorHost): Extension {
 			}
 		},
 	);
-	return [annotationDecoField, watcher];
+	// Clicking annotated text reveals its sidebar entry. Marker widgets carry
+	// their own listener; this covers mark decorations (highlights/comments).
+	const clickReveal = EditorView.domEventHandlers({
+		click(event, view): boolean {
+			const target = event.target as HTMLElement | null;
+			const el = target?.closest('[data-mdann-id]');
+			const id = el?.getAttribute('data-mdann-id');
+			const path = id ? editorViewPath(view) : null;
+			if (id && path) host.revealAnnotation(path, id);
+			return false;
+		},
+	});
+	return [annotationDecoField, watcher, clickReveal];
 }
 
 // The file path an EditorView is showing, via Obsidian's public state field.
@@ -84,6 +107,7 @@ class CommentMarkerWidget extends WidgetType {
 		private annotationId: string,
 		private classes: string,
 		private styleText: string,
+		private label: string,
 		private onClick: () => void,
 	) {
 		super();
@@ -93,18 +117,27 @@ class CommentMarkerWidget extends WidgetType {
 		return (
 			other.annotationId === this.annotationId &&
 			other.classes === this.classes &&
-			other.styleText === this.styleText
+			other.styleText === this.styleText &&
+			other.label === this.label
 		);
 	}
 
 	toDOM(view: EditorView): HTMLElement {
-		const span = view.dom.ownerDocument.createElement('span');
+		const doc = view.dom.ownerDocument;
+		const span = doc.createElement('span');
 		span.className = this.classes;
 		span.setAttribute('data-mdann-id', this.annotationId);
 		if (this.styleText !== '') span.setAttribute('style', this.styleText);
 		setIcon(span, 'message-square');
+		if (this.label !== '') {
+			const num = doc.createElement('span');
+			num.className = 'mdann-marker-num';
+			num.textContent = this.label;
+			span.appendChild(num);
+		}
 		span.addEventListener('click', (e) => {
 			e.preventDefault();
+			e.stopPropagation();
 			this.onClick();
 		});
 		return span;
@@ -148,10 +181,12 @@ export function applyEditorDecorations(
 	}
 	ranges.sort((a, b) => a.from - b.from || a.to - b.to);
 
+	const commentNumbers = numberComments(annotations, outcomes);
 	const builder = new RangeSetBuilder<Decoration>();
 	for (const r of ranges) {
 		if (r.from === r.to) {
 			const styled = settings.commentsFormattingEnabled;
+			const number = commentNumbers.get(r.annotation.id);
 			builder.add(
 				r.from,
 				r.to,
@@ -162,6 +197,7 @@ export function applyEditorDecorations(
 						styled
 							? highlightStyleText(r.annotation.type, r.annotation.format, settings)
 							: '',
+						number !== undefined ? String(number) : '',
 						() => onMarkerClick(r.annotation.id),
 					),
 					side: 1,

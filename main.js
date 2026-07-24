@@ -483,6 +483,42 @@ function resolveSelectors(text, selectors) {
   return out;
 }
 
+// src/core/ordering.ts
+function numberComments(annotations, outcomes) {
+  const matched = [];
+  for (const a of annotations) {
+    if (a.type !== "comment") continue;
+    const outcome = outcomes.get(a.id);
+    if ((outcome == null ? void 0 : outcome.status) === "matched") matched.push({ id: a.id, start: outcome.start });
+  }
+  matched.sort((x, y) => x.start - y.start);
+  const map = /* @__PURE__ */ new Map();
+  matched.forEach((m, i) => map.set(m.id, i + 1));
+  return map;
+}
+function lineNumberAt(body, offset) {
+  const clamped = Math.max(0, Math.min(offset, body.length));
+  let line = 1;
+  for (let i = 0; i < clamped; i++) {
+    if (body.charCodeAt(i) === 10) line++;
+  }
+  return line;
+}
+function nearestAnnotationId(annotations, outcomes, offset) {
+  let best = null;
+  let bestDist = Number.POSITIVE_INFINITY;
+  for (const a of annotations) {
+    const outcome = outcomes.get(a.id);
+    if ((outcome == null ? void 0 : outcome.status) !== "matched") continue;
+    const dist = offset < outcome.start ? outcome.start - offset : offset > outcome.end ? offset - outcome.end : 0;
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = a.id;
+    }
+  }
+  return best;
+}
+
 // src/core/queue.ts
 var WriteQueue = class {
   constructor(io, delayMs, scheduler, onError = () => void 0) {
@@ -761,37 +797,57 @@ function buildEditorExtension(host) {
       }
       update(update) {
         if (update.docChanged) host.scheduleEditorResolve(update.view, EDITOR_RESOLVE_DEBOUNCE_MS);
+        else if (update.selectionSet) host.onEditorSelectionChange(update.view);
       }
       destroy() {
         host.detachEditor(this.view);
       }
     }
   );
-  return [annotationDecoField, watcher];
+  const clickReveal = import_view.EditorView.domEventHandlers({
+    click(event, view) {
+      const target = event.target;
+      const el = target == null ? void 0 : target.closest("[data-mdann-id]");
+      const id = el == null ? void 0 : el.getAttribute("data-mdann-id");
+      const path = id ? editorViewPath(view) : null;
+      if (id && path) host.revealAnnotation(path, id);
+      return false;
+    }
+  });
+  return [annotationDecoField, watcher, clickReveal];
 }
 function editorViewPath(view) {
   var _a, _b, _c;
   return (_c = (_b = (_a = view.state.field(import_obsidian.editorInfoField, false)) == null ? void 0 : _a.file) == null ? void 0 : _b.path) != null ? _c : null;
 }
 var CommentMarkerWidget = class extends import_view.WidgetType {
-  constructor(annotationId, classes, styleText, onClick) {
+  constructor(annotationId, classes, styleText, label, onClick) {
     super();
     this.annotationId = annotationId;
     this.classes = classes;
     this.styleText = styleText;
+    this.label = label;
     this.onClick = onClick;
   }
   eq(other) {
-    return other.annotationId === this.annotationId && other.classes === this.classes && other.styleText === this.styleText;
+    return other.annotationId === this.annotationId && other.classes === this.classes && other.styleText === this.styleText && other.label === this.label;
   }
   toDOM(view) {
-    const span = view.dom.ownerDocument.createElement("span");
+    const doc = view.dom.ownerDocument;
+    const span = doc.createElement("span");
     span.className = this.classes;
     span.setAttribute("data-mdann-id", this.annotationId);
     if (this.styleText !== "") span.setAttribute("style", this.styleText);
     (0, import_obsidian.setIcon)(span, "message-square");
+    if (this.label !== "") {
+      const num = doc.createElement("span");
+      num.className = "mdann-marker-num";
+      num.textContent = this.label;
+      span.appendChild(num);
+    }
     span.addEventListener("click", (e) => {
       e.preventDefault();
+      e.stopPropagation();
       this.onClick();
     });
     return span;
@@ -819,10 +875,12 @@ function applyEditorDecorations(view, annotations, outcomes, settings, onMarkerC
     ranges.push({ from, to, annotation });
   }
   ranges.sort((a, b) => a.from - b.from || a.to - b.to);
+  const commentNumbers = numberComments(annotations, outcomes);
   const builder = new import_state.RangeSetBuilder();
   for (const r of ranges) {
     if (r.from === r.to) {
       const styled = settings.commentsFormattingEnabled;
+      const number = commentNumbers.get(r.annotation.id);
       builder.add(
         r.from,
         r.to,
@@ -831,6 +889,7 @@ function applyEditorDecorations(view, annotations, outcomes, settings, onMarkerC
             r.annotation.id,
             markerClasses() + (styled ? "" : " mdann-marker-plain"),
             styled ? highlightStyleText(r.annotation.type, r.annotation.format, settings) : "",
+            number !== void 0 ? String(number) : "",
             () => onMarkerClick(r.annotation.id)
           ),
           side: 1
@@ -897,16 +956,16 @@ var HighlightRenderChild = class extends import_obsidian2.MarkdownRenderChild {
   // Resolve `selector` against this element's rendered text and wrap the
   // match. The rendered text differs from the markdown source (syntax is
   // stripped), which is exactly what the staged matcher tolerates.
-  tryWrap(selector, classes, styleVars, annotationId) {
+  tryWrap(selector, classes, styleVars, annotationId, onClick) {
     const { text, slices } = collectTextSlices(this.containerEl);
     if (text === "") return;
     const result = resolveSelector(text, selector);
     if (result.status !== "matched") return;
-    this.wrapRange(slices, result.start, result.end, classes, styleVars, annotationId);
+    this.wrapRange(slices, result.start, result.end, classes, styleVars, annotationId, onClick);
   }
   // Resolve a point selector (empty quote) against the rendered text and
   // insert a marker icon at the matched position.
-  tryMarker(selector, classes, styleVars, annotationId, onClick) {
+  tryMarker(selector, classes, styleVars, annotationId, label, onClick) {
     var _a;
     const { text, slices } = collectTextSlices(this.containerEl);
     if (text === "") return;
@@ -919,6 +978,12 @@ var HighlightRenderChild = class extends import_obsidian2.MarkdownRenderChild {
     span.setAttribute("data-mdann-id", annotationId);
     span.setCssProps(styleVars);
     (0, import_obsidian2.setIcon)(span, "message-square");
+    if (label !== "") {
+      const num = doc.createElement("span");
+      num.className = "mdann-marker-num";
+      num.textContent = label;
+      span.appendChild(num);
+    }
     span.addEventListener("click", (e) => {
       e.preventDefault();
       onClick();
@@ -931,7 +996,7 @@ var HighlightRenderChild = class extends import_obsidian2.MarkdownRenderChild {
     (_a = slice.node.parentNode) == null ? void 0 : _a.insertBefore(span, anchor);
     this.markers.push(span);
   }
-  wrapRange(slices, start, end, classes, styleVars, annotationId) {
+  wrapRange(slices, start, end, classes, styleVars, annotationId, onClick) {
     var _a;
     const doc = this.containerEl.ownerDocument;
     for (const slice of slices) {
@@ -944,9 +1009,10 @@ var HighlightRenderChild = class extends import_obsidian2.MarkdownRenderChild {
       if (localFrom > 0) target = target.splitText(localFrom);
       if (localTo - localFrom < target.length) target.splitText(localTo - localFrom);
       const span = doc.createElement("span");
-      span.className = classes;
+      span.className = classes + " mdann-hl-clickable";
       span.setAttribute("data-mdann-id", annotationId);
       span.setCssProps(styleVars);
+      span.addEventListener("click", () => onClick());
       (_a = target.parentNode) == null ? void 0 : _a.insertBefore(span, target);
       span.appendChild(target);
       this.spans.push(span);
@@ -1003,6 +1069,7 @@ function createReadingPostProcessor(host) {
       if (candidates.length === 0) return;
     }
     const settings = host.settings;
+    const commentNumbers = numberComments(state.annotations, state.outcomes);
     const child = new HighlightRenderChild(el);
     for (const annotation of candidates) {
       const outcome = state.outcomes.get(annotation.id);
@@ -1011,12 +1078,14 @@ function createReadingPostProcessor(host) {
       if (outcome.start === outcome.end) {
         if (annotation.type !== "comment" || settings.commentsHiddenEnabled) continue;
         const styled = settings.commentsFormattingEnabled;
+        const number = commentNumbers.get(annotation.id);
         child.tryMarker(
           selector,
           markerClasses() + (styled ? "" : " mdann-marker-plain"),
           styled ? highlightStyleVars(annotation.type, annotation.format, settings) : {},
           annotation.id,
-          () => host.openSidebar()
+          number !== void 0 ? String(number) : "",
+          () => host.revealAnnotation(ctx.sourcePath, annotation.id)
         );
         continue;
       }
@@ -1026,7 +1095,8 @@ function createReadingPostProcessor(host) {
         selector,
         highlightClasses(annotation.type, annotation.format, settings),
         highlightStyleVars(annotation.type, annotation.format, settings),
-        annotation.id
+        annotation.id,
+        () => host.revealAnnotation(ctx.sourcePath, annotation.id)
       );
     }
     if (child.spanCount > 0) ctx.addChild(child);
@@ -1470,11 +1540,18 @@ var FormatSuggestModal = class extends import_obsidian4.FuzzySuggestModal {
 // src/ui/sidebar.ts
 var import_obsidian5 = require("obsidian");
 var SIDEBAR_VIEW_TYPE = "md-annotation-sidebar";
+var FLASH_MS = 1200;
 var AnnotationSidebarView = class extends import_obsidian5.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.plugin = plugin;
     this.unsubscribe = null;
+    // One card element per annotation id, rebuilt each render, so reveal/sync
+    // can scroll to and highlight a specific entry.
+    this.cardEls = /* @__PURE__ */ new Map();
+    // True until the first render after opening, so we can scroll to the entry
+    // nearest the cursor exactly once on open.
+    this.freshOpen = true;
   }
   getViewType() {
     return SIDEBAR_VIEW_TYPE;
@@ -1486,6 +1563,7 @@ var AnnotationSidebarView = class extends import_obsidian5.ItemView {
     return "highlighter";
   }
   onOpen() {
+    this.freshOpen = true;
     this.unsubscribe = this.plugin.onStateChange(() => this.render());
     this.render();
     return Promise.resolve();
@@ -1500,8 +1578,10 @@ var AnnotationSidebarView = class extends import_obsidian5.ItemView {
     const active = this.contentEl.ownerDocument.activeElement;
     if (active && this.contentEl.contains(active) && active.tagName === "TEXTAREA") return;
     const root = this.contentEl;
+    const prevScroll = root.scrollTop;
     root.empty();
     root.addClass("mdann-sidebar");
+    this.cardEls.clear();
     const file = this.plugin.activeMarkdownFile();
     if (!file) {
       root.createEl("p", { text: "Open a note to see its annotations.", cls: "mdann-empty" });
@@ -1513,6 +1593,7 @@ var AnnotationSidebarView = class extends import_obsidian5.ItemView {
       root.createEl("p", { text: "No annotations in this note yet.", cls: "mdann-empty" });
       return;
     }
+    const commentNumbers = numberComments(state.annotations, state.outcomes);
     const matched = [];
     const orphaned = [];
     for (const annotation of state.annotations) {
@@ -1524,13 +1605,27 @@ var AnnotationSidebarView = class extends import_obsidian5.ItemView {
     if (matched.length > 0) {
       this.sectionHeader(root, `Annotations (${matched.length})`);
       for (const { annotation } of matched) {
-        this.renderCard(root, file.path, annotation, state.outcomes.get(annotation.id));
+        this.renderCard(
+          root,
+          file.path,
+          annotation,
+          state.outcomes.get(annotation.id),
+          commentNumbers.get(annotation.id),
+          state.body
+        );
       }
     }
     if (orphaned.length > 0) {
       this.sectionHeader(root, `Orphaned (${orphaned.length})`);
       for (const annotation of orphaned) {
-        this.renderCard(root, file.path, annotation, state.outcomes.get(annotation.id));
+        this.renderCard(
+          root,
+          file.path,
+          annotation,
+          state.outcomes.get(annotation.id),
+          commentNumbers.get(annotation.id),
+          state.body
+        );
       }
     }
     if (state.unparseable.length > 0) {
@@ -1541,51 +1636,76 @@ var AnnotationSidebarView = class extends import_obsidian5.ItemView {
       });
       for (const raw of state.unparseable) this.renderUnparseable(root, file.path, raw);
     }
+    this.applyRevealOrRestore(file.path, prevScroll);
+  }
+  // After a rebuild, either honor an explicit reveal request (click-from-text
+  // or sync), scroll to the entry nearest the cursor on first open, or leave
+  // the scroll position exactly where it was (so a status toggle, comment
+  // edit, etc. never yanks the list — Update001 "Do not scroll SB on status
+  // change").
+  applyRevealOrRestore(path, prevScroll) {
+    const reveal = this.plugin.consumePendingReveal(path);
+    if (reveal) {
+      this.scrollToCard(reveal.id, { flash: reveal.flash, focus: reveal.focus });
+      this.freshOpen = false;
+      return;
+    }
+    if (this.freshOpen) {
+      this.freshOpen = false;
+      const nearest = this.plugin.nearestToCursor(path);
+      if (nearest) {
+        this.scrollToCard(nearest, { flash: false, focus: false });
+        return;
+      }
+    }
+    this.contentEl.scrollTop = prevScroll;
+  }
+  scrollToCard(id, opts) {
+    for (const el of this.cardEls.values()) el.removeClass("mdann-card-active");
+    const card = this.cardEls.get(id);
+    if (!card) return;
+    card.addClass("mdann-card-active");
+    card.scrollIntoView({ block: "center" });
+    if (opts.flash) {
+      card.addClass("mdann-flash");
+      this.contentEl.win.setTimeout(() => card.removeClass("mdann-flash"), FLASH_MS);
+    }
+    if (opts.focus) {
+      const textarea = card.querySelector("textarea");
+      textarea == null ? void 0 : textarea.focus();
+    }
   }
   sectionHeader(root, text) {
     root.createEl("div", { text, cls: "mdann-section" });
   }
-  renderCard(root, path, annotation, outcome) {
+  renderCard(root, path, annotation, outcome, commentNumber, body) {
     const isOrphan = outcome === void 0 || outcome.status === "orphaned";
     const card = root.createDiv({ cls: "mdann-card" + (isOrphan ? " mdann-card-orphan" : "") });
-    const quote = card.createDiv({ cls: "mdann-quote" });
-    const isPointComment = annotation.type === "comment" && annotation.selector.exact === "";
-    const excerpt = annotation.selector.exact.length > 120 ? annotation.selector.exact.slice(0, 120) + "\u2026" : annotation.selector.exact;
-    const chip = quote.createEl("span", {
-      text: isPointComment ? "\u{1F4AC} comment marker" : excerpt === "" ? "(empty quote)" : excerpt,
-      cls: highlightClasses(annotation.type, annotation.format, this.plugin.settings)
-    });
-    chip.setCssProps(highlightStyleVars(annotation.type, annotation.format, this.plugin.settings));
+    this.cardEls.set(annotation.id, card);
     if (!isOrphan) {
-      chip.addClass("mdann-quote-clickable");
-      chip.addEventListener("click", () => {
+      card.addClass("mdann-card-clickable");
+      card.addEventListener("click", (event) => {
+        const target = event.target;
+        if (target == null ? void 0 : target.closest("button, select, textarea, input, a")) return;
         void this.plugin.jumpToAnnotation(path, annotation.id);
       });
     }
+    const isPointComment = annotation.type === "comment" && annotation.selector.exact === "";
+    const quote = card.createDiv({ cls: "mdann-quote" });
+    if (isPointComment && commentNumber !== void 0) {
+      quote.createEl("span", { text: String(commentNumber), cls: "mdann-card-num" });
+    }
+    const excerpt = annotation.selector.exact.length > 120 ? annotation.selector.exact.slice(0, 120) + "\u2026" : annotation.selector.exact;
+    const chip = quote.createEl("span", {
+      text: isPointComment ? "comment marker" : excerpt === "" ? "(empty quote)" : excerpt,
+      cls: highlightClasses(annotation.type, annotation.format, this.plugin.settings)
+    });
+    chip.setCssProps(highlightStyleVars(annotation.type, annotation.format, this.plugin.settings));
     if (isOrphan) {
       const reason = outcome && outcome.status === "orphaned" && outcome.reason === "ambiguous" ? "Multiple equally likely locations \u2014 select the right text and re-anchor." : "Original text not found \u2014 select the new text and re-anchor.";
       card.createEl("div", { text: reason, cls: "mdann-orphan-reason" });
     }
-    if (annotation.type === "highlight") {
-      const row = card.createDiv({ cls: "mdann-format-select-row" });
-      row.createEl("span", { text: "Format", cls: "mdann-format-select-label" });
-      const select = row.createEl("select", { cls: "dropdown mdann-format-select" });
-      const names = Object.keys(this.plugin.settings.formatStyles);
-      if (!names.includes(annotation.format)) {
-        const missing = select.createEl("option", {
-          text: `${annotation.format} (missing)`,
-          attr: { value: annotation.format }
-        });
-        missing.selected = true;
-      }
-      for (const name of names) {
-        const option = select.createEl("option", { text: name, attr: { value: name } });
-        if (name === annotation.format) option.selected = true;
-      }
-      select.addEventListener("change", () => {
-        this.plugin.setFormat(path, annotation.id, select.value);
-      });
-    }
+    this.renderFormatSelector(card, path, annotation);
     const comment = card.createEl("textarea", {
       cls: "mdann-comment-input",
       attr: { rows: "2", placeholder: annotation.type === "comment" ? "Comment\u2026" : "Note\u2026" }
@@ -1597,7 +1717,11 @@ var AnnotationSidebarView = class extends import_obsidian5.ItemView {
     const meta = card.createDiv({ cls: "mdann-meta" });
     const author = annotation.author === "" ? "unknown author" : annotation.author;
     const created = annotation.dateCreate.slice(0, 10);
-    meta.setText(`${author} \xB7 ${created} \xB7 ${annotation.status}`);
+    let metaText = `${author} \xB7 ${created} \xB7 ${annotation.status}`;
+    if (annotation.type === "comment" && (outcome == null ? void 0 : outcome.status) === "matched") {
+      metaText += ` \xB7 line ${lineNumberAt(body, outcome.start)}`;
+    }
+    meta.setText(metaText);
     const buttons = card.createDiv({ cls: "mdann-buttons" });
     if (isOrphan) {
       const reanchor = buttons.createEl("button", { text: "Re-anchor to selection" });
@@ -1614,8 +1738,39 @@ var AnnotationSidebarView = class extends import_obsidian5.ItemView {
     }
     const del = buttons.createEl("button", { text: "Delete", cls: "mod-warning" });
     del.addEventListener("click", () => {
-      this.plugin.deleteAnnotation(path, annotation.id);
+      this.confirmDelete(annotation, () => this.plugin.deleteAnnotation(path, annotation.id));
     });
+  }
+  // A format dropdown bound to one annotation. Comments lead with a "Comment"
+  // option (the dedicated comment style, stored as the empty format name).
+  renderFormatSelector(card, path, annotation) {
+    const row = card.createDiv({ cls: "mdann-format-select-row" });
+    row.createEl("span", { text: "Format", cls: "mdann-format-select-label" });
+    const select = row.createEl("select", { cls: "dropdown mdann-format-select" });
+    if (annotation.type === "comment") {
+      const def = select.createEl("option", { text: "Comment", attr: { value: "" } });
+      if (annotation.format === "") def.selected = true;
+    }
+    const names = Object.keys(this.plugin.settings.formatStyles);
+    if (annotation.format !== "" && !names.includes(annotation.format)) {
+      const missing = select.createEl("option", {
+        text: `${annotation.format} (missing)`,
+        attr: { value: annotation.format }
+      });
+      missing.selected = true;
+    }
+    for (const name of names) {
+      const option = select.createEl("option", { text: name, attr: { value: name } });
+      if (name === annotation.format) option.selected = true;
+    }
+    select.addEventListener("change", () => {
+      this.plugin.setFormat(path, annotation.id, select.value);
+    });
+  }
+  confirmDelete(annotation, onConfirm) {
+    const isComment = annotation.type === "comment";
+    const label = isComment ? "this comment" : "this annotation";
+    new SidebarConfirmModal(this.app, `Delete ${label}? This cannot be undone.`, onConfirm).open();
   }
   renderUnparseable(root, path, raw) {
     const card = root.createDiv({ cls: "mdann-card mdann-card-orphan" });
@@ -1623,14 +1778,41 @@ var AnnotationSidebarView = class extends import_obsidian5.ItemView {
     const buttons = card.createDiv({ cls: "mdann-buttons" });
     const del = buttons.createEl("button", { text: "Delete line", cls: "mod-warning" });
     del.addEventListener("click", () => {
-      this.plugin.deleteUnparseableLine(path, raw);
+      new SidebarConfirmModal(
+        this.app,
+        "Delete this unreadable block line? This cannot be undone.",
+        () => this.plugin.deleteUnparseableLine(path, raw)
+      ).open();
     });
+  }
+};
+var SidebarConfirmModal = class extends import_obsidian5.Modal {
+  constructor(app, message, onConfirm) {
+    super(app);
+    this.message = message;
+    this.onConfirm = onConfirm;
+  }
+  onOpen() {
+    this.contentEl.createEl("p", { text: this.message });
+    const buttonRow = this.contentEl.createDiv("mdann-confirm-buttons");
+    const cancelBtn = buttonRow.createEl("button", { text: "Cancel" });
+    cancelBtn.addEventListener("click", () => this.close());
+    const confirmBtn = buttonRow.createEl("button", { text: "Delete", cls: "mod-warning" });
+    confirmBtn.addEventListener("click", () => {
+      this.onConfirm();
+      this.close();
+    });
+  }
+  onClose() {
+    this.contentEl.empty();
   }
 };
 
 // src/main.ts
 var WRITE_DEBOUNCE_MS = 500;
 var DISK_REFRESH_DEBOUNCE_MS = 400;
+var SYNC_DEBOUNCE_MS = 150;
+var TEXT_FLASH_MS = 1200;
 var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
   constructor() {
     super(...arguments);
@@ -1640,6 +1822,16 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
     this.editorTimers = /* @__PURE__ */ new Map();
     this.diskTimers = /* @__PURE__ */ new Map();
     this.changeListeners = /* @__PURE__ */ new Set();
+    // A one-shot request the sidebar consumes on its next render: scroll to
+    // (and optionally flash/focus) the entry for `id`.
+    this.pendingReveal = null;
+    // Paths whose already-rendered Reading view has been re-rendered once after
+    // annotations first loaded (fixes formatting not appearing until a toggle).
+    this.initialRendered = /* @__PURE__ */ new Set();
+    // "Sync text and sidebar" toggle: when on, cursor moves scroll the sidebar
+    // to the nearest entry.
+    this.syncEnabled = false;
+    this.syncTimer = null;
   }
   async onload() {
     this.settings = normalizeSettings(await this.loadData());
@@ -1669,6 +1861,7 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
     this.addCommand({
       id: "annotate",
       name: "Annotate",
+      icon: "highlighter",
       editorCallback: (editor, ctx) => {
         this.annotateOrComment(editor, ctx);
       }
@@ -1676,8 +1869,31 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
     this.addCommand({
       id: "open-sidebar",
       name: "Open annotation sidebar",
+      icon: "panel-right",
       callback: () => {
         void this.activateSidebar();
+      }
+    });
+    this.addCommand({
+      id: "toggle-sync",
+      name: "Sync text and sidebar",
+      icon: "arrow-left-right",
+      callback: () => {
+        this.syncEnabled = !this.syncEnabled;
+        new import_obsidian6.Notice(`Text/sidebar sync ${this.syncEnabled ? "on" : "off"}`);
+        if (this.syncEnabled && this.hasSidebar()) {
+          const file = this.activeMarkdownFile();
+          if (file) {
+            const nearest = this.nearestToCursor(file.path);
+            if (nearest) {
+              void this.revealInSidebar(file.path, nearest, {
+                flash: false,
+                focus: false,
+                activate: false
+              });
+            }
+          }
+        }
       }
     });
     this.addCommand({
@@ -1744,6 +1960,10 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
     this.editorTimers.clear();
     for (const timer of this.diskTimers.values()) window.clearTimeout(timer);
     this.diskTimers.clear();
+    if (this.syncTimer !== null) {
+      window.clearTimeout(this.syncTimer);
+      this.syncTimer = null;
+    }
     void this.queue.flush().finally(() => this.queue.dispose());
     this.app.workspace.iterateAllLeaves((leaf) => {
       sweepHighlightSpans(leaf.view.containerEl);
@@ -1766,7 +1986,23 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
     const file = this.app.vault.getFileByPath(path);
     if (!file || file.extension !== "md") return null;
     const doc = await this.app.vault.cachedRead(file);
-    return this.setStateFromDoc(path, doc);
+    const state = this.setStateFromDoc(path, doc);
+    this.scheduleInitialPreviewRender(path);
+    return state;
+  }
+  scheduleInitialPreviewRender(path) {
+    if (this.initialRendered.has(path)) return;
+    this.initialRendered.add(path);
+    window.setTimeout(() => this.rerenderPreviewsForPath(path), 0);
+  }
+  rerenderPreviewsForPath(path) {
+    var _a;
+    for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+      const view = leaf.view;
+      if (view instanceof import_obsidian6.MarkdownView && view.getMode() === "preview" && ((_a = view.file) == null ? void 0 : _a.path) === path) {
+        view.previewMode.rerender(true);
+      }
+    }
   }
   // Parse + resolve one document snapshot, persist self-healed selectors,
   // and cache the result.
@@ -1854,8 +2090,8 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
     if (path === null) return;
     const state = this.states.get(path);
     if (!state) return;
-    applyEditorDecorations(view, state.annotations, state.outcomes, this.settings, () => {
-      void this.activateSidebar();
+    applyEditorDecorations(view, state.annotations, state.outcomes, this.settings, (id) => {
+      this.revealAnnotation(path, id);
     });
   }
   decorateAllFor(path) {
@@ -2077,10 +2313,71 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
     const to = editor.offsetToPos(outcome.end);
     editor.setSelection(from, to);
     editor.scrollIntoView({ from, to }, true);
+    this.flashInText(id);
   }
-  // ReadingHost surface (marker clicks open the sidebar).
-  openSidebar() {
-    void this.activateSidebar();
+  // ── Text ⇄ sidebar reveal / sync ─────────────────────────────────────────
+  // Called when annotated text or a comment marker is clicked in the editor or
+  // Reading view: open the sidebar, scroll to the entry, flash it, and focus
+  // its comment box (Update001 "jump the cursor to the Comment text box").
+  revealAnnotation(path, id) {
+    void this.revealInSidebar(path, id, { flash: true, focus: true, activate: true });
+  }
+  // Cursor moved in an editor — when sync is on and the sidebar is open, scroll
+  // it to the nearest entry.
+  onEditorSelectionChange(view) {
+    if (!this.syncEnabled) return;
+    const path = editorViewPath(view);
+    if (path === null || !this.hasSidebar()) return;
+    const offset = view.state.selection.main.head;
+    if (this.syncTimer !== null) window.clearTimeout(this.syncTimer);
+    this.syncTimer = window.setTimeout(() => {
+      this.syncTimer = null;
+      const state = this.states.get(path);
+      if (!state) return;
+      const id = nearestAnnotationId(state.annotations, state.outcomes, offset);
+      if (id) void this.revealInSidebar(path, id, { flash: false, focus: false, activate: false });
+    }, SYNC_DEBOUNCE_MS);
+  }
+  // The matched entry nearest the active editor's cursor (used to scroll the
+  // sidebar on open and when sync is switched on).
+  nearestToCursor(path) {
+    var _a;
+    const state = this.states.get(path);
+    if (!state) return null;
+    let offset = 0;
+    const view = this.app.workspace.getActiveViewOfType(import_obsidian6.MarkdownView);
+    if (view && ((_a = view.file) == null ? void 0 : _a.path) === path) {
+      offset = view.editor.posToOffset(view.editor.getCursor("head"));
+    }
+    return nearestAnnotationId(state.annotations, state.outcomes, offset);
+  }
+  async revealInSidebar(path, id, opts) {
+    this.pendingReveal = { path, id, flash: opts.flash, focus: opts.focus };
+    if (opts.activate) await this.activateSidebar();
+    this.notifyChange();
+  }
+  consumePendingReveal(path) {
+    const reveal = this.pendingReveal;
+    if (reveal && reveal.path === path) {
+      this.pendingReveal = null;
+      return { id: reveal.id, flash: reveal.flash, focus: reveal.focus };
+    }
+    return null;
+  }
+  hasSidebar() {
+    return this.app.workspace.getLeavesOfType(SIDEBAR_VIEW_TYPE).length > 0;
+  }
+  // Briefly highlight every rendered occurrence of an annotation in the note
+  // (Update001 "Flash … Comment icon … when SB entry is active").
+  flashInText(id) {
+    const selector = `[data-mdann-id="${CSS.escape(id)}"]`;
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      for (const el of Array.from(leaf.view.containerEl.querySelectorAll(selector))) {
+        const node = el;
+        node.addClass("mdann-flash-text");
+        window.setTimeout(() => node.removeClass("mdann-flash-text"), TEXT_FLASH_MS);
+      }
+    });
   }
   async activateSidebar() {
     const existing = this.app.workspace.getLeavesOfType(SIDEBAR_VIEW_TYPE)[0];
