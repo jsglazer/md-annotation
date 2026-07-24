@@ -38,6 +38,8 @@ The two are distinguished by whether text is selected when you run the single **
 - **Text ⇄ sidebar sync** — an optional mode (command **Sync text and sidebar**) that keeps the sidebar tracking the entry nearest the cursor as you move through the note
 - **Show/hide formatting** on demand — commands and settings toggles to hide annotation colors, comment colors, or comment markers entirely
 - **Format renames propagate** — rename a format in settings and every note referencing the old name is rewritten automatically
+- **A command per format** — each format automatically gets its own **Apply - _name_** command (usable from the Command Palette, a hotkey, or a toolbar); adding, renaming, or deleting a format creates or removes its command instantly
+- **Note Toolbar integration** — a paste-in script builds a live "apply format" menu from those commands, so you can highlight the selection (or drop a comment at the cursor) from a [Note Toolbar](https://github.com/chrisgurney/obsidian-note-toolbar) button (see below)
 - **Queryable from Dataview / Datacore** — a public JS API for `dataviewjs` / `datacorejs` / `datacorejsx` blocks (see below)
 - **Orphan repair** — orphaned annotations are flagged; select the new text and re-anchor with one click
 - **Metadata** on every annotation: author (from settings), status, created / modified / closed timestamps
@@ -48,6 +50,7 @@ The two are distinguished by whether text is selected when you run the single **
 | Command | Action |
 | --- | --- |
 | **Annotate** | Selection → highlight it (pick a format if more than one is enabled); no selection → insert a comment marker at the cursor |
+| **Apply - _name_** (one per format) | Apply that specific format directly: selection → highlight it; no selection → drop a comment marker in that format's color. Registered and removed automatically as formats change. |
 | **Show/hide annotation formats** | Toggle highlight colors on annotated text |
 | **Show/hide comment formats** | Toggle colors on comment markers |
 | **Sync text and sidebar** | Toggle continuous syncing of the sidebar to the entry nearest the cursor |
@@ -62,6 +65,23 @@ Settings are organized into **General / Annotations / Comments** tabs:
 - **General** — the author name recorded on every annotation you create
 - **Annotations** — a formatting visibility toggle, plus a per-format grid: Use checkbox, editable name, Fr/Bg colors for light and dark themes (each color has its own enable checkbox), font size, and a live sample-text example. Renaming a format here also updates every annotated note.
 - **Comments** — hide-markers and formatting toggles, plus the dedicated comment format's Fr/Bg colors per theme with a live example
+
+## Note Toolbar: an "apply format" menu
+
+Each format has its own `md-annotation:apply-<name>` command, so [Note Toolbar](https://github.com/chrisgurney/obsidian-note-toolbar) can present all your formats in one pop-up menu that stays in sync automatically — no manual toolbar editing when you add or rename a format.
+
+1. In Note Toolbar, enable **Other → Scripting**, then add a toolbar item of type **JavaScript**.
+2. Paste in the script from [`docs/note-toolbar-menu.js`](docs/note-toolbar-menu.js).
+
+Clicking the item opens a menu of every format; picking one runs its command against the active editor — selection → highlight, bare cursor → comment. The script discovers formats from the live command list, so nothing needs updating as formats change.
+
+Scripts can also read the format list directly from the plugin API:
+
+```js
+const api = app.plugins.plugins['md-annotation'].api;
+api.getFormatNames();               // e.g. ['Yellow', 'Key', 'EditThis']
+api.getFormatCommandId('EditThis'); // 'md-annotation:apply-EditThis' (or null)
+```
 
 ## Querying with Dataview / Datacore
 
