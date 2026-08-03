@@ -33,9 +33,11 @@ The two are distinguished by whether text is selected when you run the single **
 
 - **Highlights** with unlimited custom formats — per-format Use toggle, font/background colors (each with its own enable checkbox) per light/dark theme, and an optional font size
 - **Point comments** — a **numbered** marker icon at any spot in the text, no selection needed; styled by the dedicated comment format or any annotation format
-- **Sidebar** listing every annotation of the active note: **click an entry to jump to it in the text**, edit comments, **reassign an annotation (or comment) to a different format** via a dropdown, open/close status, delete (with confirmation)
-- **Two-way navigation** — click annotated text or a comment marker to jump to its sidebar entry (and focus its comment box); on open the sidebar scrolls to the entry nearest the cursor
-- **Text ⇄ sidebar sync** — an optional mode (command **Sync text and sidebar**) that keeps the sidebar tracking the entry nearest the cursor as you move through the note
+- **Sidebar** listing every annotation of the active note: **click an entry to jump to it in the text**, edit comments, **reassign an annotation (or comment) to a different format** via a dropdown, open/close status, delete (with confirmation). Comment entries show their **line number in the top right** of the card.
+- **Sidebar toolbar** — **search** across every note/comment box, a **format filter** built from the identifiers actually present in the open note (so you can show only your `Key` or `Define` entries), and **First / Last** buttons that scroll the list to either end
+- **Two-way navigation** — click annotated text or a comment marker to jump to its sidebar entry (and focus its comment box); on open the sidebar scrolls to the entry nearest the cursor. Clicking into an entry's note box flashes that annotation in the text so you can see what you're writing about.
+- **Text ⇄ sidebar sync** — the sidebar tracks the entry nearest the cursor as you move through the note. On by default; switchable from settings or the **Sync text and sidebar** command (the two are one state).
+- **Share formats between vaults** — export every format to the clipboard as JSON and import it in another vault, merging into what's already there or replacing the set outright. Obsidian Sync replicates a vault to your *other devices*, never to your *other vaults*, so this is the way formats travel.
 - **Show/hide formatting** on demand — commands and settings toggles to hide annotation colors, comment colors, or comment markers entirely
 - **Format renames propagate** — rename a format in settings and every note referencing the old name is rewritten automatically
 - **A command per format** — each format automatically gets its own **Apply - _name_** command (usable from the Command Palette, a hotkey, or a toolbar); adding, renaming, or deleting a format creates or removes its command instantly
@@ -53,7 +55,7 @@ The two are distinguished by whether text is selected when you run the single **
 | **Apply - _name_** (one per format) | Apply that specific format directly: selection → highlight it; no selection → drop a comment marker in that format's color. Registered and removed automatically as formats change. |
 | **Show/hide annotation formats** | Toggle highlight colors on annotated text |
 | **Show/hide comment formats** | Toggle colors on comment markers |
-| **Sync text and sidebar** | Toggle continuous syncing of the sidebar to the entry nearest the cursor |
+| **Sync text and sidebar** | Toggle continuous syncing of the sidebar to the entry nearest the cursor. Flips the same persisted setting shown on the General tab. |
 | **Open annotation sidebar** | Open the annotations panel |
 
 The Annotate action is also in the editor context menu — shown as *Annotate selection* or *Insert comment* depending on whether text is selected.
@@ -62,9 +64,28 @@ The Annotate action is also in the editor context menu — shown as *Annotate se
 
 Settings are organized into **General / Annotations / Comments** tabs:
 
-- **General** — the author name recorded on every annotation you create
+- **General** — the author name recorded on every annotation you create; three **navigation** toggles (all on by default); and **format export / import**
 - **Annotations** — a formatting visibility toggle, plus a per-format grid: Use checkbox, editable name, Fr/Bg colors for light and dark themes (each color has its own enable checkbox), font size, and a live sample-text example. Renaming a format here also updates every annotated note.
 - **Comments** — hide-markers and formatting toggles, plus the dedicated comment format's Fr/Bg colors per theme with a live example
+
+### Navigation toggles
+
+Each direction of the text ⇄ sidebar link can be switched off independently:
+
+| Toggle | Effect when on |
+| --- | --- |
+| **Sync text and sidebar** | Moving the cursor in the note scrolls the sidebar to the nearest entry |
+| **Sidebar click jumps to text** | Clicking a sidebar entry selects and scrolls to that text in the note |
+| **Text click jumps to sidebar** | Clicking annotated text or a comment marker opens the sidebar, scrolls to that entry, and puts the cursor in its comment box |
+
+### Sharing formats between vaults
+
+Formats are stored in the vault's own `data.json`. Obsidian Sync replicates one vault to that same vault on your other devices — it never bridges two different vaults — so formats added in one vault never show up in another on their own. To move them:
+
+1. In the source vault: **Settings → MD Annotation → General → Export formats → Copy to clipboard**.
+2. In the target vault: **Import formats → Paste and import**, then choose **Merge** or **Replace all**.
+
+**Merge** adds only the formats the target vault doesn't already have, leaving any format you've tuned there untouched. **Replace all** swaps the whole set and is confirmed separately — annotations referencing a format that isn't in the payload fall back to the first enabled format until you reassign them.
 
 ## Note Toolbar: an "apply format" menu
 
