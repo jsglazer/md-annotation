@@ -11,10 +11,13 @@ import { Modal, Notice, PluginSettingTab, Setting } from 'obsidian';
 
 import type { ColorOption, PartStyle, ThemedPartStyles } from './core/settings';
 import {
+	exportFormats,
 	isUnsafeKey,
 	isValidFontSize,
 	makeFormatStyle,
+	mergeFormats,
 	normalizeHex,
+	parseFormatsImport,
 } from './core/settings';
 import type MdAnnotationPlugin from './main';
 
@@ -111,6 +114,108 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				}),
 			);
+
+		this.renderNavigationSection(containerEl);
+		this.renderFormatTransferSection(containerEl);
+	}
+
+	// The three text ⇄ sidebar navigation behaviours, each independently
+	// switchable. All default on.
+	private renderNavigationSection(containerEl: HTMLElement): void {
+		new Setting(containerEl).setName('Navigation').setHeading();
+
+		this.renderToggle(
+			containerEl,
+			'Sync text and sidebar',
+			'Moving the cursor in the note scrolls the sidebar to the nearest entry (also toggled by the "Sync text and sidebar" command)',
+			() => this.plugin.settings.syncTextAndSidebar,
+			(v) => {
+				this.plugin.settings.syncTextAndSidebar = v;
+			},
+		);
+		this.renderToggle(
+			containerEl,
+			'Sidebar click jumps to text',
+			'Clicking an annotation or comment entry in the sidebar selects and scrolls to that text in the note',
+			() => this.plugin.settings.sidebarClickJumpsToText,
+			(v) => {
+				this.plugin.settings.sidebarClickJumpsToText = v;
+			},
+		);
+		this.renderToggle(
+			containerEl,
+			'Text click jumps to sidebar',
+			'Clicking annotated text or a comment marker opens the sidebar, scrolls to that entry and puts the cursor in its comment box',
+			() => this.plugin.settings.textClickJumpsToSidebar,
+			(v) => {
+				this.plugin.settings.textClickJumpsToSidebar = v;
+			},
+		);
+	}
+
+	// Formats are stored in this vault's own data.json. Obsidian Sync replicates
+	// a vault to itself on other devices — it never bridges two different vaults
+	// — so moving formats between vaults is an explicit copy/paste.
+	private renderFormatTransferSection(containerEl: HTMLElement): void {
+		new Setting(containerEl).setName('Share formats between vaults').setHeading();
+		containerEl.createEl('p', {
+			text:
+				'Formats live in this vault only. Obsidian Sync copies a vault to your other ' +
+				'devices, not to your other vaults, so formats added in one vault never appear ' +
+				'in another. Export them here and import the result in the other vault.',
+			cls: 'setting-item-description',
+		});
+
+		new Setting(containerEl)
+			.setName('Export formats')
+			.setDesc('Copy every format (and the comment style) to the clipboard as JSON')
+			.addButton((btn) =>
+				btn.setButtonText('Copy to clipboard').onClick(() => {
+					const json = exportFormats(this.plugin.settings);
+					void navigator.clipboard.writeText(json).then(
+						() => {
+							const count = Object.keys(this.plugin.settings.formatStyles).length;
+							new Notice(`Copied ${count} format${count === 1 ? '' : 's'} to the clipboard`);
+						},
+						() => new Notice('Could not write to the clipboard'),
+					);
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName('Import formats')
+			.setDesc('Paste an exported payload to add its formats to this vault')
+			.addButton((btn) =>
+				btn
+					.setButtonText('Paste and import')
+					.setCta()
+					.onClick(() => {
+						new ImportFormatsModal(this.app, (text, mode) => this.importFormats(text, mode)).open();
+					}),
+			);
+	}
+
+	// Returns an outcome message for the modal; null means the import ran and
+	// the modal can close.
+	private importFormats(text: string, mode: 'merge' | 'replace'): string | null {
+		const parsed = parseFormatsImport(text);
+		if (!parsed) return 'That does not look like an exported format payload.';
+
+		const result = mergeFormats(this.plugin.settings.formatStyles, parsed.formatStyles, mode);
+		this.plugin.settings.formatStyles = result.formatStyles;
+		if (parsed.commentStyle) this.plugin.settings.commentStyle = parsed.commentStyle;
+
+		void this.saveAndRefresh().then(() => this.display());
+
+		const added = result.added.length;
+		const skipped = result.skipped.length;
+		new Notice(
+			mode === 'replace'
+				? `Replaced formats with ${added} imported format${added === 1 ? '' : 's'}`
+				: `Imported ${added} format${added === 1 ? '' : 's'}` +
+					(skipped > 0 ? `, kept ${skipped} already here` : ''),
+		);
+		return null;
 	}
 
 	// ── Annotations tab ──────────────────────────────────────────────────────
@@ -505,6 +610,64 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 	}
 }
 
+// Paste target for an exported format payload. Merge adds only names this
+// vault does not already have (never touching a format you have tuned here);
+// Replace swaps the whole set, so it is confirmed separately.
+class ImportFormatsModal extends Modal {
+	constructor(
+		app: App,
+		private onImport: (text: string, mode: 'merge' | 'replace') => string | null,
+	) {
+		super(app);
+	}
+
+	onOpen(): void {
+		this.contentEl.createEl('h3', { text: 'Import formats' });
+		this.contentEl.createEl('p', {
+			text: 'Paste the JSON copied by the export button in the other vault.',
+			cls: 'setting-item-description',
+		});
+
+		const input = this.contentEl.createEl('textarea', {
+			cls: 'mdann-import-input',
+			attr: { rows: '10', placeholder: '{ "version": 1, "formatStyles": { … } }', spellcheck: 'false' },
+		});
+		const error = this.contentEl.createEl('p', { cls: 'mdann-import-error' });
+
+		const run = (mode: 'merge' | 'replace') => {
+			const message = this.onImport(input.value, mode);
+			if (message === null) {
+				this.close();
+				return;
+			}
+			error.setText(message);
+		};
+
+		const buttonRow = this.contentEl.createDiv('mdann-confirm-buttons');
+		const cancelBtn = buttonRow.createEl('button', { text: 'Cancel' });
+		cancelBtn.addEventListener('click', () => this.close());
+
+		const replaceBtn = buttonRow.createEl('button', { text: 'Replace all', cls: 'mod-warning' });
+		replaceBtn.addEventListener('click', () => {
+			new ConfirmModal(
+				this.app,
+				'Replace every format in this vault with the imported ones? Annotations using a format that is not in the payload will fall back to the first enabled format until you reassign them.',
+				() => run('replace'),
+				'Replace all',
+			).open();
+		});
+
+		const mergeBtn = buttonRow.createEl('button', { text: 'Merge', cls: 'mod-cta' });
+		mergeBtn.addEventListener('click', () => run('merge'));
+
+		input.focus();
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
+	}
+}
+
 // Simple Yes/No confirmation modal, used before destructive actions like
 // deleting a format's configured style.
 class ConfirmModal extends Modal {
@@ -512,6 +675,7 @@ class ConfirmModal extends Modal {
 		app: App,
 		private message: string,
 		private onConfirm: () => void,
+		private confirmText = 'Delete',
 	) {
 		super(app);
 	}
@@ -523,7 +687,7 @@ class ConfirmModal extends Modal {
 		const cancelBtn = buttonRow.createEl('button', { text: 'Cancel' });
 		cancelBtn.addEventListener('click', () => this.close());
 
-		const confirmBtn = buttonRow.createEl('button', { text: 'Delete', cls: 'mod-warning' });
+		const confirmBtn = buttonRow.createEl('button', { text: this.confirmText, cls: 'mod-warning' });
 		confirmBtn.addEventListener('click', () => {
 			this.onConfirm();
 			this.close();

@@ -57,9 +57,6 @@ export default class MdAnnotationPlugin extends Plugin {
 	// Paths whose already-rendered Reading view has been re-rendered once after
 	// annotations first loaded (fixes formatting not appearing until a toggle).
 	private initialRendered = new Set<string>();
-	// "Sync text and sidebar" toggle: when on, cursor moves scroll the sidebar
-	// to the nearest entry.
-	private syncEnabled = false;
 	private syncTimer: number | null = null;
 	// Format names that currently have a generated "Apply - <name>" command, so
 	// syncFormatCommands can diff against settings and add/remove as they change.
@@ -116,9 +113,11 @@ export default class MdAnnotationPlugin extends Plugin {
 			name: 'Sync text and sidebar',
 			icon: 'arrow-left-right',
 			callback: () => {
-				this.syncEnabled = !this.syncEnabled;
-				new Notice(`Text/sidebar sync ${this.syncEnabled ? 'on' : 'off'}`);
-				if (this.syncEnabled && this.hasSidebar()) {
+				// The command and the General-tab toggle are one persisted state.
+				this.settings.syncTextAndSidebar = !this.settings.syncTextAndSidebar;
+				void this.saveSettings();
+				new Notice(`Text/sidebar sync ${this.settings.syncTextAndSidebar ? 'on' : 'off'}`);
+				if (this.settings.syncTextAndSidebar && this.hasSidebar()) {
 					const file = this.activeMarkdownFile();
 					if (file) {
 						const nearest = this.nearestToCursor(file.path);
@@ -651,7 +650,10 @@ export default class MdAnnotationPlugin extends Plugin {
 
 	// ── Navigation & sidebar ─────────────────────────────────────────────────
 
+	// Sidebar entry → the annotation in the note. Governed by the General-tab
+	// "Sidebar click jumps to text" toggle.
 	async jumpToAnnotation(path: string, id: string): Promise<void> {
+		if (!this.settings.sidebarClickJumpsToText) return;
 		const state = this.states.get(path);
 		const outcome = state?.outcomes.get(id);
 		if (!outcome || outcome.status !== 'matched') return;
@@ -667,7 +669,7 @@ export default class MdAnnotationPlugin extends Plugin {
 		const to = editor.offsetToPos(outcome.end);
 		editor.setSelection(from, to);
 		editor.scrollIntoView({ from, to }, true);
-		this.flashInText(id);
+		this.flashAnnotationInText(id);
 	}
 
 	// ── Text ⇄ sidebar reveal / sync ─────────────────────────────────────────
@@ -675,14 +677,16 @@ export default class MdAnnotationPlugin extends Plugin {
 	// Called when annotated text or a comment marker is clicked in the editor or
 	// Reading view: open the sidebar, scroll to the entry, flash it, and focus
 	// its comment box (Update001 "jump the cursor to the Comment text box").
+	// Governed by the General-tab "Text click jumps to sidebar" toggle.
 	revealAnnotation(path: string, id: string): void {
+		if (!this.settings.textClickJumpsToSidebar) return;
 		void this.revealInSidebar(path, id, { flash: true, focus: true, activate: true });
 	}
 
 	// Cursor moved in an editor — when sync is on and the sidebar is open, scroll
 	// it to the nearest entry.
 	onEditorSelectionChange(view: EditorView): void {
-		if (!this.syncEnabled) return;
+		if (!this.settings.syncTextAndSidebar) return;
 		const path = editorViewPath(view);
 		if (path === null || !this.hasSidebar()) return;
 		const offset = view.state.selection.main.head;
@@ -737,8 +741,10 @@ export default class MdAnnotationPlugin extends Plugin {
 	}
 
 	// Briefly highlight every rendered occurrence of an annotation in the note
-	// (Update001 "Flash … Comment icon … when SB entry is active").
-	private flashInText(id: string): void {
+	// (Update001 "Flash … Comment icon … when SB entry is active"). Public so the
+	// sidebar can also fire it when you click into an entry's Note field
+	// (Update003) — the flash points out where that entry lives in the text.
+	flashAnnotationInText(id: string): void {
 		const selector = `[data-mdann-id="${CSS.escape(id)}"]`;
 		this.app.workspace.iterateAllLeaves((leaf) => {
 			for (const el of Array.from(leaf.view.containerEl.querySelectorAll(selector))) {

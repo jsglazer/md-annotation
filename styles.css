@@ -151,10 +151,61 @@ body.theme-dark .mdann-marker-plain {
 	text-align: center;
 }
 
+/* Card head: quote on the left, line number pinned to the top right */
+.mdann-card-head {
+	display: flex;
+	align-items: flex-start;
+	gap: var(--size-4-2);
+}
+
 .mdann-quote {
+	flex: 1;
+	min-width: 0;
 	margin-bottom: var(--size-4-1);
 	line-height: 1.4;
 	word-break: break-word;
+}
+
+.mdann-card-line {
+	flex: none;
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+	white-space: nowrap;
+	line-height: 1.4;
+}
+
+/* ── Sidebar toolbar (search / filter / First / Last) ─────────────────── */
+
+.mdann-toolbar {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-1);
+	padding-bottom: var(--size-4-2);
+	margin-bottom: var(--size-4-1);
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.mdann-toolbar-row {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-1);
+}
+
+.mdann-search-input {
+	width: 100%;
+	font-size: var(--font-ui-small);
+}
+
+.mdann-filter-select {
+	flex: 1;
+	min-width: 0;
+	font-size: var(--font-ui-small);
+}
+
+.mdann-jump-btn {
+	flex: none;
+	font-size: var(--font-ui-small);
+	padding: 2px 10px;
 }
 
 .mdann-orphan-reason {
@@ -415,4 +466,23 @@ body.theme-dark .mdann-marker-plain {
 	justify-content: flex-end;
 	gap: 8px;
 	margin-top: 16px;
+}
+
+/* ── Settings: import-formats modal ──────────────────────────────────── */
+
+.mdann-import-input {
+	width: 100%;
+	resize: vertical;
+	font-family: var(--font-monospace);
+	font-size: 0.8em;
+}
+
+.mdann-import-error:empty {
+	display: none;
+}
+
+.mdann-import-error {
+	color: var(--text-error);
+	font-size: 0.85em;
+	margin: 6px 0 0;
 }

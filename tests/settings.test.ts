@@ -1,13 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import {
 	defaultSettings,
+	exportFormats,
 	firstUsedFormatName,
 	formatClass,
 	highlightClasses,
 	highlightStyleVars,
 	isValidFontSize,
 	makeFormatStyle,
+	mergeFormats,
 	normalizeHex,
+	parseFormatsImport,
 	normalizeSettings,
 	partStyle,
 	resolveStyle,
@@ -170,5 +173,70 @@ describe('highlightClasses', () => {
 
 	it('sanitizes format names into safe class names', () => {
 		expect(formatClass('weird name!')).toBe('mdann-f-weird-name-');
+	});
+});
+
+describe('navigation toggles', () => {
+	it('defaults every text ⇄ sidebar behaviour to on', () => {
+		const s = defaultSettings();
+		expect(s.syncTextAndSidebar).toBe(true);
+		expect(s.sidebarClickJumpsToText).toBe(true);
+		expect(s.textClickJumpsToSidebar).toBe(true);
+	});
+
+	it('reads stored values and ignores non-booleans', () => {
+		const s = normalizeSettings({
+			syncTextAndSidebar: false,
+			sidebarClickJumpsToText: 'no',
+			textClickJumpsToSidebar: false,
+		});
+		expect(s.syncTextAndSidebar).toBe(false);
+		expect(s.sidebarClickJumpsToText).toBe(true);
+		expect(s.textClickJumpsToSidebar).toBe(false);
+	});
+});
+
+describe('format export / import', () => {
+	it('round-trips formats and the comment style', () => {
+		const s = defaultSettings();
+		s.formatStyles['Key'] = makeFormatStyle();
+		const parsed = parseFormatsImport(exportFormats(s));
+		expect(parsed).not.toBeNull();
+		expect(Object.keys(parsed?.formatStyles ?? {})).toEqual(['Yellow', 'Key']);
+		expect(parsed?.commentStyle).toEqual(s.commentStyle);
+	});
+
+	it('accepts a bare name-keyed record and reports no comment style', () => {
+		const parsed = parseFormatsImport(JSON.stringify({ Key: makeFormatStyle() }));
+		expect(Object.keys(parsed?.formatStyles ?? {})).toEqual(['Key']);
+		expect(parsed?.commentStyle).toBeNull();
+	});
+
+	it('rejects malformed, empty, or format-free payloads', () => {
+		expect(parseFormatsImport('not json')).toBeNull();
+		expect(parseFormatsImport('[]')).toBeNull();
+		expect(parseFormatsImport('{"formatStyles":{}}')).toBeNull();
+	});
+
+	it('drops prototype-unsafe names on import', () => {
+		const parsed = parseFormatsImport(
+			'{"formatStyles":{"__proto__":{"use":true},"Key":{"use":true}}}',
+		);
+		expect(Object.keys(parsed?.formatStyles ?? {})).toEqual(['Key']);
+	});
+
+	it('merge keeps existing formats and appends only new names', () => {
+		const current = { Key: makeFormatStyle() };
+		const incoming = { Key: makeFormatStyle(), Define: makeFormatStyle() };
+		const result = mergeFormats(current, incoming, 'merge');
+		expect(result.added).toEqual(['Define']);
+		expect(result.skipped).toEqual(['Key']);
+		expect(result.formatStyles['Key']).toBe(current['Key']);
+	});
+
+	it('replace takes the imported set verbatim', () => {
+		const result = mergeFormats({ Key: makeFormatStyle() }, { Define: makeFormatStyle() }, 'replace');
+		expect(Object.keys(result.formatStyles)).toEqual(['Define']);
+		expect(result.skipped).toEqual([]);
 	});
 });

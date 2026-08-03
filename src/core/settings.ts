@@ -41,6 +41,13 @@ export interface MdAnnotationSettings {
 	commentsFormattingEnabled: boolean;
 	commentsHiddenEnabled: boolean;
 
+	// Navigation toggles (General tab), all on by default. Each governs one
+	// direction of the text ⇄ sidebar link; the "Sync text and sidebar" command
+	// flips syncTextAndSidebar, so the command and the setting are one state.
+	syncTextAndSidebar: boolean;
+	sidebarClickJumpsToText: boolean;
+	textClickJumpsToSidebar: boolean;
+
 	// The single dedicated style for comments (point markers).
 	commentStyle: ThemedPartStyles;
 }
@@ -79,6 +86,9 @@ export function defaultSettings(): MdAnnotationSettings {
 		annotationFormattingEnabled: true,
 		commentsFormattingEnabled: true,
 		commentsHiddenEnabled: false,
+		syncTextAndSidebar: true,
+		sidebarClickJumpsToText: true,
+		textClickJumpsToSidebar: true,
 		commentStyle: {
 			light: partStyle('', '#c8e6c9'),
 			dark: partStyle('', '#2e5d33'),
@@ -145,6 +155,9 @@ export function normalizeSettings(raw: unknown): MdAnnotationSettings {
 		'annotationFormattingEnabled',
 		'commentsFormattingEnabled',
 		'commentsHiddenEnabled',
+		'syncTextAndSidebar',
+		'sidebarClickJumpsToText',
+		'textClickJumpsToSidebar',
 	] as const;
 	for (const key of booleanKeys) {
 		if (typeof r[key] === 'boolean') s[key] = r[key];
@@ -194,6 +207,97 @@ export function normalizeSettings(raw: unknown): MdAnnotationSettings {
 	}
 
 	return s;
+}
+
+// ── Format export / import (cross-vault sharing) ───────────────────────────
+//
+// Obsidian Sync replicates one vault to *itself* on other devices — it never
+// bridges two different vaults, so a format created in vault A never reaches
+// vault B no matter how the "Installed community plugins" toggle is set.
+// These helpers move formats explicitly: export produces a JSON payload, import
+// reads one back.
+
+export const FORMATS_EXPORT_VERSION = 1;
+
+export interface FormatsPayload {
+	version: number;
+	formatStyles: Record<string, FormatStyle>;
+	commentStyle: ThemedPartStyles;
+}
+
+export function exportFormats(settings: MdAnnotationSettings): string {
+	const payload: FormatsPayload = {
+		version: FORMATS_EXPORT_VERSION,
+		formatStyles: settings.formatStyles,
+		commentStyle: settings.commentStyle,
+	};
+	return JSON.stringify(payload, null, '\t');
+}
+
+// Every valid, safely-named format in a name-keyed record, normalized.
+function readFormatStyleRecord(v: unknown): Record<string, FormatStyle> {
+	const styles = asRecord(v);
+	const next: Record<string, FormatStyle> = {};
+	if (!styles) return next;
+	for (const [name, value] of Object.entries(styles)) {
+		if (name === '' || isUnsafeKey(name)) continue;
+		if (!asRecord(value)) continue;
+		next[name] = readFormatStyle(value);
+	}
+	return next;
+}
+
+export interface ImportedFormats {
+	formatStyles: Record<string, FormatStyle>;
+	// Absent when the payload carried no comment style (e.g. a bare
+	// formatStyles object was pasted) — the current one is then kept.
+	commentStyle: ThemedPartStyles | null;
+}
+
+// Parse a pasted payload. Accepts the full export envelope, a bare
+// { formatStyles: … } object, or a bare name-keyed record of formats, so a
+// hand-trimmed paste still works. Returns null when no format survives —
+// the caller reports that rather than wiping the user's formats.
+export function parseFormatsImport(text: string): ImportedFormats | null {
+	let raw: unknown;
+	try {
+		raw = JSON.parse(text);
+	} catch {
+		return null;
+	}
+	const r = asRecord(raw);
+	if (!r) return null;
+
+	const source = 'formatStyles' in r ? r.formatStyles : raw;
+	const formatStyles = readFormatStyleRecord(source);
+	if (Object.keys(formatStyles).length === 0) return null;
+
+	const commentStyle = asRecord(r.commentStyle) ? readThemedPartStyles(r.commentStyle) : null;
+	return { formatStyles, commentStyle };
+}
+
+// 'replace' takes the imported set verbatim; 'merge' keeps every existing
+// format untouched and appends only names not already present.
+export function mergeFormats(
+	current: Record<string, FormatStyle>,
+	incoming: Record<string, FormatStyle>,
+	mode: 'merge' | 'replace',
+): { formatStyles: Record<string, FormatStyle>; added: string[]; skipped: string[] } {
+	if (mode === 'replace') {
+		return { formatStyles: { ...incoming }, added: Object.keys(incoming), skipped: [] };
+	}
+	const formatStyles: Record<string, FormatStyle> = { ...current };
+	const added: string[] = [];
+	const skipped: string[] = [];
+	for (const [name, style] of Object.entries(incoming)) {
+		if (name in formatStyles) {
+			skipped.push(name);
+			continue;
+		}
+		formatStyles[name] = style;
+		added.push(name);
+	}
+	return { formatStyles, added, skipped };
 }
 
 // ── Hex / font-size validation ─────────────────────────────────────────────

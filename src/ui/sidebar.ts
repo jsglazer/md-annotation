@@ -1,6 +1,11 @@
 // Sidebar panel: lists every annotation of the active note — matched
 // highlights/comments, orphaned annotations flagged for repair, and
 // unparseable block lines needing attention (e.g. after a sync conflict).
+//
+// A toolbar at the top (modelled on the core Outline panel) narrows the list:
+// a search box over the Note/Comment text, a format filter built from the
+// identifiers actually present in the active note, and First/Last buttons that
+// scroll the list to either end.
 
 import type { App, WorkspaceLeaf } from 'obsidian';
 import { ItemView, Modal } from 'obsidian';
@@ -15,14 +20,33 @@ export const SIDEBAR_VIEW_TYPE = 'md-annotation-sidebar';
 
 const FLASH_MS = 1200;
 
+// Filter identity for one annotation. Comments using the dedicated comment
+// style carry no format name, so they get their own value; prefixes keep a
+// format literally named "Comment" distinct from the comment style itself.
+const COMMENT_FILTER = 'c:';
+
+function filterValue(annotation: Annotation): string {
+	return annotation.format === '' ? COMMENT_FILTER : `f:${annotation.format}`;
+}
+
+function filterLabel(annotation: Annotation): string {
+	return annotation.format === '' ? 'Comment' : annotation.format;
+}
+
 export class AnnotationSidebarView extends ItemView {
 	private unsubscribe: (() => void) | null = null;
 	// One card element per annotation id, rebuilt each render, so reveal/sync
 	// can scroll to and highlight a specific entry.
 	private cardEls = new Map<string, HTMLElement>();
+	// Ids of the cards currently rendered, in display order — what First/Last
+	// jump to, so they honor the active search/filter.
+	private visibleOrder: string[] = [];
 	// True until the first render after opening, so we can scroll to the entry
 	// nearest the cursor exactly once on open.
 	private freshOpen = true;
+	// Toolbar state, kept across re-renders (the panel rebuilds on every change).
+	private searchQuery = '';
+	private formatFilter = '';
 
 	constructor(
 		leaf: WorkspaceLeaf,
@@ -64,9 +88,16 @@ export class AnnotationSidebarView extends ItemView {
 
 		const root = this.contentEl;
 		const prevScroll = root.scrollTop;
+		// A rebuild while typing in the search box would drop the caret — note
+		// where it was and restore it once the new toolbar exists.
+		const searchCaret =
+			active instanceof HTMLInputElement && active.hasClass('mdann-search-input')
+				? active.selectionStart
+				: null;
 		root.empty();
 		root.addClass('mdann-sidebar');
 		this.cardEls.clear();
+		this.visibleOrder = [];
 
 		const file = this.plugin.activeMarkdownFile();
 		if (!file) {
@@ -90,9 +121,16 @@ export class AnnotationSidebarView extends ItemView {
 		}
 		matched.sort((a, b) => a.start - b.start);
 
-		if (matched.length > 0) {
-			this.sectionHeader(root, `Annotations (${matched.length})`);
-			for (const { annotation } of matched) {
+		// The toolbar's filter list is built from the whole note, so an option
+		// never disappears just because the current search hides its entries.
+		this.renderToolbar(root, state.annotations);
+
+		const visibleMatched = matched.filter((m) => this.passesFilters(m.annotation));
+		const visibleOrphaned = orphaned.filter((a) => this.passesFilters(a));
+
+		if (visibleMatched.length > 0) {
+			this.sectionHeader(root, this.countLabel('Annotations', visibleMatched.length, matched.length));
+			for (const { annotation } of visibleMatched) {
 				this.renderCard(
 					root,
 					file.path,
@@ -103,9 +141,9 @@ export class AnnotationSidebarView extends ItemView {
 				);
 			}
 		}
-		if (orphaned.length > 0) {
-			this.sectionHeader(root, `Orphaned (${orphaned.length})`);
-			for (const annotation of orphaned) {
+		if (visibleOrphaned.length > 0) {
+			this.sectionHeader(root, this.countLabel('Orphaned', visibleOrphaned.length, orphaned.length));
+			for (const annotation of visibleOrphaned) {
 				this.renderCard(
 					root,
 					file.path,
@@ -115,6 +153,16 @@ export class AnnotationSidebarView extends ItemView {
 					state.body,
 				);
 			}
+		}
+		if (
+			visibleMatched.length === 0 &&
+			visibleOrphaned.length === 0 &&
+			state.annotations.length > 0
+		) {
+			root.createEl('p', {
+				text: 'No entries match the current search or filter.',
+				cls: 'mdann-empty',
+			});
 		}
 		if (state.unparseable.length > 0) {
 			this.sectionHeader(root, `Needs attention (${state.unparseable.length})`);
@@ -125,7 +173,98 @@ export class AnnotationSidebarView extends ItemView {
 			for (const raw of state.unparseable) this.renderUnparseable(root, file.path, raw);
 		}
 
+		this.restoreSearchFocus(searchCaret);
 		this.applyRevealOrRestore(file.path, prevScroll);
+	}
+
+	// "Annotations (3)" normally; "Annotations (3 of 11)" while narrowed.
+	private countLabel(name: string, shown: number, total: number): string {
+		return shown === total ? `${name} (${shown})` : `${name} (${shown} of ${total})`;
+	}
+
+	private passesFilters(annotation: Annotation): boolean {
+		if (this.formatFilter !== '' && filterValue(annotation) !== this.formatFilter) return false;
+		if (this.searchQuery === '') return true;
+		return annotation.comment.toLowerCase().includes(this.searchQuery);
+	}
+
+	// ── Toolbar ──────────────────────────────────────────────────────────────
+
+	private renderToolbar(root: HTMLElement, annotations: ReadonlyArray<Annotation>): void {
+		const bar = root.createDiv({ cls: 'mdann-toolbar' });
+
+		// Row 1 — search over the Note/Comment text.
+		const searchRow = bar.createDiv({ cls: 'mdann-toolbar-row' });
+		const search = searchRow.createEl('input', {
+			cls: 'mdann-search-input',
+			attr: {
+				type: 'search',
+				placeholder: 'Search notes and comments…',
+				spellcheck: 'false',
+			},
+		});
+		search.value = this.searchQuery;
+		search.addEventListener('input', () => {
+			this.searchQuery = search.value.trim().toLowerCase();
+			this.render();
+		});
+
+		// Row 2 — format filter (left), First / Last (center, right).
+		const controlRow = bar.createDiv({ cls: 'mdann-toolbar-row' });
+		this.renderFilterSelect(controlRow, annotations);
+
+		const first = controlRow.createEl('button', {
+			text: 'First',
+			cls: 'mdann-jump-btn',
+			attr: { 'aria-label': 'Scroll to the first entry' },
+		});
+		const last = controlRow.createEl('button', {
+			text: 'Last',
+			cls: 'mdann-jump-btn',
+			attr: { 'aria-label': 'Scroll to the last entry' },
+		});
+		// Both scroll the sidebar only — the note view is deliberately left alone.
+		first.addEventListener('click', () => this.jumpToEnd('first'));
+		last.addEventListener('click', () => this.jumpToEnd('last'));
+	}
+
+	private renderFilterSelect(row: HTMLElement, annotations: ReadonlyArray<Annotation>): void {
+		const select = row.createEl('select', { cls: 'dropdown mdann-filter-select' });
+		select.createEl('option', { text: 'All formats', attr: { value: '' } });
+
+		// Identifiers present in this note, comment style first, then names A→Z.
+		const present = new Map<string, string>();
+		for (const annotation of annotations) present.set(filterValue(annotation), filterLabel(annotation));
+		const entries = [...present.entries()].sort(([a], [b]) => {
+			if (a === COMMENT_FILTER) return -1;
+			if (b === COMMENT_FILTER) return 1;
+			return a.localeCompare(b);
+		});
+		for (const [value, label] of entries) {
+			select.createEl('option', { text: label, attr: { value } });
+		}
+
+		// A filter whose format vanished from the note falls back to "All".
+		if (this.formatFilter !== '' && !present.has(this.formatFilter)) this.formatFilter = '';
+		select.value = this.formatFilter;
+		select.addEventListener('change', () => {
+			this.formatFilter = select.value;
+			this.render();
+		});
+	}
+
+	private jumpToEnd(end: 'first' | 'last'): void {
+		const id = end === 'first' ? this.visibleOrder[0] : this.visibleOrder[this.visibleOrder.length - 1];
+		if (id === undefined) return;
+		this.scrollToCard(id, { flash: false, focus: false });
+	}
+
+	private restoreSearchFocus(caret: number | null): void {
+		if (caret === null) return;
+		const search = this.contentEl.querySelector<HTMLInputElement>('.mdann-search-input');
+		if (!search) return;
+		search.focus();
+		search.setSelectionRange(caret, caret);
 	}
 
 	// After a rebuild, either honor an explicit reveal request (click-from-text
@@ -153,6 +292,8 @@ export class AnnotationSidebarView extends ItemView {
 
 	private scrollToCard(id: string, opts: { flash: boolean; focus: boolean }): void {
 		for (const el of this.cardEls.values()) el.removeClass('mdann-card-active');
+		// The target may be hidden by the active search/filter — then there is
+		// nothing to scroll to and the list stays put.
 		const card = this.cardEls.get(id);
 		if (!card) return;
 		card.addClass('mdann-card-active');
@@ -182,6 +323,7 @@ export class AnnotationSidebarView extends ItemView {
 		const isOrphan = outcome === undefined || outcome.status === 'orphaned';
 		const card = root.createDiv({ cls: 'mdann-card' + (isOrphan ? ' mdann-card-orphan' : '') });
 		this.cardEls.set(annotation.id, card);
+		this.visibleOrder.push(annotation.id);
 
 		// Clicking anywhere on a matched card (but not on its controls) jumps to
 		// the annotation in the note.
@@ -196,7 +338,9 @@ export class AnnotationSidebarView extends ItemView {
 
 		const isPointComment = annotation.type === 'comment' && annotation.selector.exact === '';
 
-		const quote = card.createDiv({ cls: 'mdann-quote' });
+		// Head row: the quote on the left, the line number pinned top right.
+		const head = card.createDiv({ cls: 'mdann-card-head' });
+		const quote = head.createDiv({ cls: 'mdann-quote' });
 		if (isPointComment && commentNumber !== undefined) {
 			quote.createEl('span', { text: String(commentNumber), cls: 'mdann-card-num' });
 		}
@@ -209,6 +353,14 @@ export class AnnotationSidebarView extends ItemView {
 			cls: highlightClasses(annotation.type, annotation.format, this.plugin.settings),
 		});
 		chip.setCssProps(highlightStyleVars(annotation.type, annotation.format, this.plugin.settings));
+		// Line number for a matched comment entry (Update001 "Show line number in
+		// Comment SB entry"), top right of the box since Update003.
+		if (annotation.type === 'comment' && outcome?.status === 'matched') {
+			head.createEl('span', {
+				text: `line ${lineNumberAt(body, outcome.start)}`,
+				cls: 'mdann-card-line',
+			});
+		}
 
 		if (isOrphan) {
 			const reason =
@@ -231,17 +383,16 @@ export class AnnotationSidebarView extends ItemView {
 		comment.addEventListener('change', () => {
 			this.plugin.setComment(path, annotation.id, comment.value);
 		});
+		// Clicking into the Note field flashes the annotation in the text, so you
+		// can see what you are writing about without leaving the box (Update003).
+		comment.addEventListener('focus', () => {
+			this.plugin.flashAnnotationInText(annotation.id);
+		});
 
 		const meta = card.createDiv({ cls: 'mdann-meta' });
 		const author = annotation.author === '' ? 'unknown author' : annotation.author;
 		const created = annotation.dateCreate.slice(0, 10);
-		let metaText = `${author} · ${created} · ${annotation.status}`;
-		// Line number for a matched comment entry (Update001 "Show line number in
-		// Comment SB entry").
-		if (annotation.type === 'comment' && outcome?.status === 'matched') {
-			metaText += ` · line ${lineNumberAt(body, outcome.start)}`;
-		}
-		meta.setText(metaText);
+		meta.setText(`${author} · ${created} · ${annotation.status}`);
 
 		const buttons = card.createDiv({ cls: 'mdann-buttons' });
 		if (isOrphan) {
