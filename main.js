@@ -582,6 +582,12 @@ var WriteQueue = class {
 };
 
 // src/core/settings.ts
+var GUTTER_MIN_WIDTH = 140;
+var GUTTER_MAX_WIDTH = 480;
+var GUTTER_DEFAULT_WIDTH = 220;
+function makeToolbarHighlight(light, dark) {
+  return { toolbarUuid: "", itemUuid: "", style: { light, dark } };
+}
 function colorOption(color = "") {
   return { enabled: color !== "", color };
 }
@@ -608,6 +614,19 @@ function defaultSettings() {
     annotationFormattingEnabled: true,
     commentsFormattingEnabled: true,
     commentsHiddenEnabled: false,
+    gutterAnnotationsEnabled: true,
+    gutterCommentsEnabled: true,
+    gutterAnnotationsSide: "right",
+    gutterCommentsSide: "right",
+    gutterWidth: GUTTER_DEFAULT_WIDTH,
+    gutterAnnotationsToolbar: makeToolbarHighlight(
+      partStyle("", "#fff3a3"),
+      partStyle("", "#7a6f1f")
+    ),
+    gutterCommentsToolbar: makeToolbarHighlight(
+      partStyle("", "#c8e6c9"),
+      partStyle("", "#2e5d33")
+    ),
     syncTextAndSidebar: true,
     sidebarClickJumpsToText: true,
     textClickJumpsToSidebar: true,
@@ -622,6 +641,13 @@ function asRecord(v) {
 }
 function readString(v) {
   return typeof v === "string" ? v : "";
+}
+function readGutterSide(v, fallback) {
+  return v === "left" || v === "right" ? v : fallback;
+}
+function clampGutterWidth(value) {
+  if (!Number.isFinite(value)) return GUTTER_DEFAULT_WIDTH;
+  return Math.min(GUTTER_MAX_WIDTH, Math.max(GUTTER_MIN_WIDTH, Math.round(value)));
 }
 function readColorOption(v) {
   const r = asRecord(v);
@@ -643,6 +669,15 @@ function readThemedPartStyles(v) {
   if (!r) return { light: partStyle(), dark: partStyle() };
   return { light: readPartStyle(r.light), dark: readPartStyle(r.dark) };
 }
+function readToolbarHighlight(v, fallback) {
+  const r = asRecord(v);
+  if (!r) return fallback;
+  return {
+    toolbarUuid: readString(r.toolbarUuid),
+    itemUuid: readString(r.itemUuid),
+    style: asRecord(r.style) ? readThemedPartStyles(r.style) : fallback.style
+  };
+}
 function readFormatStyle(v) {
   const r = asRecord(v);
   if (!r) return makeFormatStyle();
@@ -662,6 +697,8 @@ function normalizeSettings(raw) {
     "annotationFormattingEnabled",
     "commentsFormattingEnabled",
     "commentsHiddenEnabled",
+    "gutterAnnotationsEnabled",
+    "gutterCommentsEnabled",
     "syncTextAndSidebar",
     "sidebarClickJumpsToText",
     "textClickJumpsToSidebar"
@@ -669,6 +706,14 @@ function normalizeSettings(raw) {
   for (const key of booleanKeys) {
     if (typeof r[key] === "boolean") s[key] = r[key];
   }
+  s.gutterAnnotationsSide = readGutterSide(r.gutterAnnotationsSide, s.gutterAnnotationsSide);
+  s.gutterCommentsSide = readGutterSide(r.gutterCommentsSide, s.gutterCommentsSide);
+  if (typeof r.gutterWidth === "number") s.gutterWidth = clampGutterWidth(r.gutterWidth);
+  s.gutterAnnotationsToolbar = readToolbarHighlight(
+    r.gutterAnnotationsToolbar,
+    s.gutterAnnotationsToolbar
+  );
+  s.gutterCommentsToolbar = readToolbarHighlight(r.gutterCommentsToolbar, s.gutterCommentsToolbar);
   const styles = asRecord(r.formatStyles);
   if (styles) {
     const next = {};
@@ -777,6 +822,7 @@ function isValidFontSize(value) {
 var HIGHLIGHT_CLASS = "mdann-hl";
 var COMMENT_CLASS = "mdann-comment";
 var MARKER_CLASS = "mdann-marker";
+var ANCHOR_CLASS = "mdann-anchor";
 function formatClass(formatName) {
   return "mdann-f-" + formatName.replace(/[^a-zA-Z0-9_-]/g, "-");
 }
@@ -801,6 +847,10 @@ function resolveStyle(annotationType, formatName, settings) {
 function enabledColor(opt) {
   return opt.enabled && isValidHex(opt.color) ? opt.color : "";
 }
+function themedColors(style, dark) {
+  const part = dark ? style.dark : style.light;
+  return { fg: enabledColor(part.fr), bg: enabledColor(part.bg) };
+}
 function highlightStyleVars(annotationType, formatName, settings) {
   const resolved = resolveStyle(annotationType, formatName, settings);
   if (!resolved) return {};
@@ -818,6 +868,29 @@ function highlightStyleVars(annotationType, formatName, settings) {
 function highlightStyleText(annotationType, formatName, settings) {
   return Object.entries(highlightStyleVars(annotationType, formatName, settings)).map(([prop, value]) => `${prop}: ${value};`).join(" ");
 }
+function gutterStyleVars(annotationType, formatName, settings) {
+  const resolved = resolveStyle(annotationType, formatName, settings);
+  if (!resolved) return {};
+  const { style, fontSize } = resolved;
+  const vars = {};
+  const put = (name, opt) => {
+    const color = enabledColor(opt);
+    if (color !== "") vars[name] = color;
+  };
+  put("--mdann-g-light-fg", style.light.fr);
+  put("--mdann-g-light-bg", style.light.bg);
+  put("--mdann-g-dark-fg", style.dark.fr);
+  put("--mdann-g-dark-bg", style.dark.bg);
+  if (isValidFontSize(fontSize)) vars["font-size"] = fontSize.trim();
+  return vars;
+}
+var GUTTER_STYLE_PROPS = [
+  "--mdann-g-light-fg",
+  "--mdann-g-light-bg",
+  "--mdann-g-dark-fg",
+  "--mdann-g-dark-bg",
+  "font-size"
+];
 function highlightClasses(annotationType, formatName, settings) {
   var _a;
   if (annotationType === "comment" && formatName === "") {
@@ -829,6 +902,386 @@ function highlightClasses(annotationType, formatName, settings) {
 }
 function markerClasses() {
   return `${MARKER_CLASS} ${COMMENT_CLASS}`;
+}
+
+// src/editor/gutterCards.ts
+var CARD_GAP = 6;
+var LEADER_JOIN = 10;
+var PLACEHOLDER_MAX = 60;
+var MIN_TEXT_WIDTH = 280;
+var CardLayers = class {
+  constructor(doc, host, getPath, onEdit) {
+    this.host = host;
+    this.getPath = getPath;
+    this.onEdit = onEdit;
+    this.cards = /* @__PURE__ */ new Map();
+    this.doc = doc;
+    this.layers = { left: this.createLayer("left"), right: this.createLayer("right") };
+  }
+  // Move both layers into `parent`. Reading view rebuilds its content element
+  // on every re-render, so the layers have to be re-homed rather than assumed
+  // to still be attached.
+  mount(parent) {
+    if (this.layers.left.parentElement !== parent) parent.appendChild(this.layers.left);
+    if (this.layers.right.parentElement !== parent) parent.appendChild(this.layers.right);
+  }
+  destroy() {
+    this.cards.clear();
+    this.layers.left.remove();
+    this.layers.right.remove();
+  }
+  setLayerBox(side, left, width) {
+    this.layers[side].setCssProps({ left: `${left}px`, width: `${width}px` });
+  }
+  setLayerWidth(width) {
+    this.layers.left.setCssProps({ width: `${width}px` });
+    this.layers.right.setCssProps({ width: `${width}px` });
+  }
+  // Create or update the card for one annotation, and return it.
+  upsert(annotation, side, commentNumber, settings) {
+    var _a;
+    const card = (_a = this.cards.get(annotation.id)) != null ? _a : this.createCard(annotation.id, side);
+    if (card.side !== side) {
+      this.attach(card, side);
+      card.top = Number.NaN;
+    }
+    const label = commentNumber === void 0 ? "" : String(commentNumber);
+    if (card.num.textContent !== label) card.num.textContent = label;
+    const placeholder = annotation.type === "comment" ? "Comment\u2026" : excerpt(annotation.selector.exact);
+    if (card.text.placeholder !== placeholder) card.text.placeholder = placeholder;
+    if (this.doc.activeElement !== card.text && card.rendered !== annotation.comment) {
+      card.text.value = annotation.comment;
+      card.rendered = annotation.comment;
+    }
+    card.root.classList.toggle("mdann-gutter-card-closed", annotation.status === "closed");
+    const vars = gutterStyleVars(annotation.type, annotation.format, settings);
+    applyStyleProps(card.root, vars);
+    applyStyleProps(card.leader, vars);
+    return card;
+  }
+  // Drop every card that is no longer wanted.
+  prune(wanted) {
+    for (const [id, card] of this.cards) {
+      if (wanted.has(id)) continue;
+      card.root.remove();
+      card.leader.remove();
+      this.cards.delete(id);
+    }
+  }
+  // Grow one note box to fit its text. This is the one place a write precedes
+  // a read, so callers confine it to their measure phase; it is skipped when
+  // neither the text nor the available width has changed.
+  autoSize(card) {
+    const key = `${card.text.clientWidth} ${card.text.value}`;
+    if (card.sizedFor === key) return;
+    card.text.setCssProps({ height: "0px" });
+    card.text.setCssProps({ height: `${card.text.scrollHeight}px` });
+    card.sizedFor = key;
+  }
+  // Cards want to sit level with their anchor; when two would overlap the
+  // lower one is pushed down, and its leader stretches back up to the line it
+  // belongs to.
+  place(items) {
+    for (const side of ["left", "right"]) {
+      const laid = [];
+      for (const item of items) {
+        if (item.side !== side) continue;
+        if (item.anchorY === null) this.hideCard(item.id);
+        else laid.push({ id: item.id, anchorY: item.anchorY, height: item.height });
+      }
+      laid.sort((a, b) => a.anchorY - b.anchorY);
+      let cursor = Number.NEGATIVE_INFINITY;
+      for (const item of laid) {
+        const top = Math.max(item.anchorY, cursor);
+        this.placeCard(item.id, top, item.anchorY);
+        cursor = top + item.height + CARD_GAP;
+      }
+    }
+  }
+  hideAll() {
+    for (const id of this.cards.keys()) this.hideCard(id);
+  }
+  // ── DOM construction ─────────────────────────────────────────────────────
+  createLayer(side) {
+    const el = this.doc.createElement("div");
+    el.className = `mdann-gutter mdann-gutter-${side}`;
+    return el;
+  }
+  createCard(id, side) {
+    const leader = this.doc.createElement("div");
+    leader.className = "mdann-gutter-leader mdann-gutter-hidden";
+    const tick = this.doc.createElement("div");
+    tick.className = "mdann-gutter-tick";
+    leader.appendChild(tick);
+    const root = this.doc.createElement("div");
+    root.className = "mdann-gutter-card mdann-gutter-hidden";
+    root.setAttribute("data-mdann-id", id);
+    const num = this.doc.createElement("span");
+    num.className = "mdann-gutter-num";
+    root.appendChild(num);
+    const text = this.doc.createElement("textarea");
+    text.className = "mdann-gutter-text";
+    text.rows = 1;
+    root.appendChild(text);
+    const card = {
+      root,
+      leader,
+      tick,
+      num,
+      text,
+      side,
+      rendered: "",
+      top: Number.NaN,
+      sizedFor: ""
+    };
+    this.attach(card, side);
+    text.addEventListener("focus", () => {
+      root.classList.add("mdann-gutter-card-active");
+      this.host.flashAnnotationInText(id);
+    });
+    text.addEventListener("blur", () => root.classList.remove("mdann-gutter-card-active"));
+    text.addEventListener("input", () => this.onEdit());
+    text.addEventListener("change", () => {
+      card.rendered = text.value;
+      this.host.setComment(this.getPath(), id, text.value);
+    });
+    text.addEventListener("keydown", (event) => {
+      event.stopPropagation();
+      if (event.key === "Escape") text.blur();
+    });
+    root.addEventListener("mousedown", (event) => event.stopPropagation());
+    root.addEventListener("click", (event) => {
+      this.host.revealFromGutter(this.getPath(), id);
+      if (event.target === root) text.focus();
+    });
+    this.cards.set(id, card);
+    return card;
+  }
+  attach(card, side) {
+    const layer = this.layers[side];
+    layer.appendChild(card.leader);
+    layer.appendChild(card.root);
+    card.side = side;
+    card.root.classList.toggle("mdann-gutter-card-left", side === "left");
+    card.leader.classList.toggle("mdann-gutter-leader-left", side === "left");
+  }
+  placeCard(id, top, anchorY) {
+    const card = this.cards.get(id);
+    if (!card) return;
+    card.root.classList.remove("mdann-gutter-hidden");
+    card.leader.classList.remove("mdann-gutter-hidden");
+    if (card.top !== top) {
+      card.root.setCssProps({ top: `${top}px` });
+      card.top = top;
+    }
+    const join = top + LEADER_JOIN;
+    card.leader.setCssProps({
+      top: `${Math.min(join, anchorY)}px`,
+      height: `${Math.abs(join - anchorY)}px`
+    });
+    card.tick.classList.toggle("mdann-gutter-tick-bottom", anchorY > join);
+  }
+  hideCard(id) {
+    const card = this.cards.get(id);
+    if (!card) return;
+    card.root.classList.add("mdann-gutter-hidden");
+    card.leader.classList.add("mdann-gutter-hidden");
+    card.top = Number.NaN;
+  }
+};
+function gutterShows(annotation, settings) {
+  return annotation.type === "comment" ? settings.gutterCommentsEnabled : settings.gutterAnnotationsEnabled;
+}
+function gutterSideFor(annotation, settings) {
+  return annotation.type === "comment" ? settings.gutterCommentsSide : settings.gutterAnnotationsSide;
+}
+function activeGutterSides(settings) {
+  const active = (side) => settings.gutterAnnotationsEnabled && settings.gutterAnnotationsSide === side || settings.gutterCommentsEnabled && settings.gutterCommentsSide === side;
+  return { left: active("left"), right: active("right") };
+}
+function excerpt(text) {
+  const flat = text.replace(/\s+/g, " ").trim();
+  if (flat === "") return "Note\u2026";
+  return flat.length > PLACEHOLDER_MAX ? `${flat.slice(0, PLACEHOLDER_MAX)}\u2026` : flat;
+}
+function applyStyleProps(el, vars) {
+  for (const prop of GUTTER_STYLE_PROPS) {
+    if (!(prop in vars)) el.style.removeProperty(prop);
+  }
+  for (const [prop, value] of Object.entries(vars)) el.style.setProperty(prop, value);
+}
+
+// src/editor/gutterLayer.ts
+var MIN_STRIP = 60;
+var EditorGutter = class {
+  constructor(view, host) {
+    this.view = view;
+    // Document offset each card is anchored to — the CodeMirror-specific half of
+    // a card's position, so it lives here rather than on the shared card.
+    this.anchors = /* @__PURE__ */ new Map();
+    this.path = "";
+    this.width = GUTTER_DEFAULT_WIDTH;
+    this.activeSides = { left: false, right: false };
+    this.suppressed = false;
+    this.measurePending = false;
+    this.layoutDirty = false;
+    this.destroyed = false;
+    this.doc = view.dom.ownerDocument;
+    this.cards = new CardLayers(
+      this.doc,
+      host,
+      () => this.path,
+      () => this.requestLayout()
+    );
+    this.cards.mount(view.scrollDOM);
+  }
+  destroy() {
+    this.destroyed = true;
+    this.activeSides = { left: false, right: false };
+    this.applyPadding();
+    this.cards.destroy();
+    this.view.dom.classList.remove(
+      "mdann-gutter-on-left",
+      "mdann-gutter-on-right",
+      "mdann-gutter-suppressed"
+    );
+  }
+  // Reconcile the cards against the current annotations.
+  sync(path, annotations, outcomes, settings) {
+    if (this.destroyed) return;
+    this.path = path;
+    this.applyMargins(settings);
+    const numbers = numberComments(annotations, outcomes);
+    const docLength = this.view.state.doc.length;
+    const wanted = /* @__PURE__ */ new Set();
+    for (const annotation of annotations) {
+      if (!gutterShows(annotation, settings)) continue;
+      const outcome = outcomes.get(annotation.id);
+      if (!outcome || outcome.status !== "matched") continue;
+      wanted.add(annotation.id);
+      this.anchors.set(annotation.id, Math.max(0, Math.min(outcome.start, docLength)));
+      this.cards.upsert(
+        annotation,
+        gutterSideFor(annotation, settings),
+        numbers.get(annotation.id),
+        settings
+      );
+    }
+    this.cards.prune(wanted);
+    for (const id of [...this.anchors.keys()]) {
+      if (!wanted.has(id)) this.anchors.delete(id);
+    }
+    this.requestLayout();
+  }
+  // Re-place the existing cards without touching their content — the editor
+  // resized, reflowed, or scrolled a new stretch of document into view.
+  requestLayout() {
+    if (this.destroyed) return;
+    if (this.measurePending) {
+      this.layoutDirty = true;
+      return;
+    }
+    this.measurePending = true;
+    this.view.requestMeasure({
+      read: (view) => {
+        this.layoutDirty = false;
+        return this.measure(view);
+      },
+      write: (measured) => {
+        this.measurePending = false;
+        this.position(measured);
+        if (this.layoutDirty) this.requestLayout();
+      }
+    });
+  }
+  // Reserve the margin the cards occupy. Padding is applied per side whenever
+  // that side is switched on — not per card — so the text does not shift the
+  // moment the first annotation appears.
+  applyMargins(settings) {
+    this.width = clampGutterWidth(settings.gutterWidth);
+    this.activeSides = activeGutterSides(settings);
+    const dom = this.view.dom;
+    dom.classList.toggle("mdann-gutter-on-left", this.activeSides.left);
+    dom.classList.toggle("mdann-gutter-on-right", this.activeSides.right);
+    this.cards.setLayerWidth(this.width);
+    this.applyPadding();
+  }
+  // The room itself. This has to be an inline !important declaration, not a
+  // rule in styles.css: Obsidian puts --file-margins on .cm-content and themes
+  // re-declare it, so a plugin stylesheet loses the cascade no matter what
+  // specificity it uses — and a gutter with no padding behind it draws its
+  // cards straight over the text.
+  applyPadding() {
+    const content = this.view.contentDOM;
+    const set = (prop, on) => {
+      if (on) content.style.setProperty(prop, `${this.width}px`, "important");
+      else content.style.removeProperty(prop);
+    };
+    set("padding-left", this.activeSides.left && !this.suppressed);
+    set("padding-right", this.activeSides.right && !this.suppressed);
+  }
+  // ── Measure / position ───────────────────────────────────────────────────
+  measure(view) {
+    var _a;
+    const scroller = view.scrollDOM;
+    const reserved = (this.activeSides.left ? this.width : 0) + (this.activeSides.right ? this.width : 0);
+    const suppressed = scroller.clientWidth < reserved + MIN_TEXT_WIDTH;
+    if (suppressed) {
+      return { leftX: 0, leftW: 0, rightX: 0, rightW: 0, suppressed, items: [] };
+    }
+    const scrollRect = scroller.getBoundingClientRect();
+    const contentRect = view.contentDOM.getBoundingClientRect();
+    const originX = scrollRect.left - scroller.scrollLeft;
+    const originY = scrollRect.top - scroller.scrollTop;
+    const items = [];
+    for (const [id, card] of this.cards.cards) {
+      const anchor = this.anchors.get(id);
+      const coords = anchor === void 0 ? null : anchorCoords(view, anchor);
+      if (!coords) {
+        items.push({ id, side: card.side, anchorY: null, height: 0 });
+        continue;
+      }
+      this.cards.autoSize(card);
+      items.push({
+        id,
+        side: card.side,
+        anchorY: coords.top - originY,
+        height: card.root.offsetHeight
+      });
+    }
+    const style = (_a = this.doc.defaultView) == null ? void 0 : _a.getComputedStyle(view.contentDOM);
+    const strip = (value) => {
+      const n = value === void 0 ? Number.NaN : Number.parseFloat(value);
+      return Number.isFinite(n) && n >= MIN_STRIP ? n : this.width;
+    };
+    const rightW = strip(style == null ? void 0 : style.paddingRight);
+    return {
+      leftX: contentRect.left - originX,
+      leftW: strip(style == null ? void 0 : style.paddingLeft),
+      rightX: contentRect.right - originX - rightW,
+      rightW,
+      suppressed,
+      items
+    };
+  }
+  position(m) {
+    if (this.destroyed) return;
+    this.view.dom.classList.toggle("mdann-gutter-suppressed", m.suppressed);
+    if (this.suppressed !== m.suppressed) {
+      this.suppressed = m.suppressed;
+      this.applyPadding();
+    }
+    if (m.suppressed) return;
+    this.cards.setLayerBox("left", m.leftX, m.leftW);
+    this.cards.setLayerBox("right", m.rightX, m.rightW);
+    this.cards.place(m.items);
+  }
+};
+function anchorCoords(view, pos) {
+  for (const range of view.visibleRanges) {
+    if (pos >= range.from && pos <= range.to) return view.coordsAtPos(pos);
+  }
+  return null;
 }
 
 // src/editor/livePreview.ts
@@ -861,6 +1314,9 @@ function buildEditorExtension(host) {
       update(update) {
         if (update.docChanged) host.scheduleEditorResolve(update.view, EDITOR_RESOLVE_DEBOUNCE_MS);
         else if (update.selectionSet) host.onEditorSelectionChange(update.view);
+        if (update.geometryChanged || update.viewportChanged) {
+          host.onEditorGeometryChange(update.view);
+        }
       }
       destroy() {
         host.detachEditor(this.view);
@@ -975,6 +1431,200 @@ function applyEditorDecorations(view, annotations, outcomes, settings, onMarkerC
   view.dispatch({ effects: setAnnotationDecorations.of(builder.finish()) });
 }
 
+// src/editor/readingGutter.ts
+var SCROLLER_SELECTOR = ".markdown-preview-view";
+var SIZER_SELECTOR = ".markdown-preview-sizer";
+var MIN_STRIP2 = 60;
+var ReadingGutter = class {
+  constructor(container, host) {
+    this.container = container;
+    this.scroller = null;
+    this.sizer = null;
+    this.path = "";
+    this.width = GUTTER_DEFAULT_WIDTH;
+    this.activeSides = { left: false, right: false };
+    this.suppressed = false;
+    this.frame = null;
+    this.destroyed = false;
+    this.doc = container.ownerDocument;
+    this.cards = new CardLayers(
+      this.doc,
+      host,
+      () => this.path,
+      () => this.requestLayout()
+    );
+    const win = this.doc.defaultView;
+    this.observer = win ? new win.ResizeObserver(() => this.requestLayout()) : null;
+  }
+  destroy() {
+    var _a, _b, _c;
+    this.destroyed = true;
+    (_a = this.observer) == null ? void 0 : _a.disconnect();
+    if (this.frame !== null) {
+      (_b = this.doc.defaultView) == null ? void 0 : _b.cancelAnimationFrame(this.frame);
+      this.frame = null;
+    }
+    this.activeSides = { left: false, right: false };
+    this.applyPadding();
+    (_c = this.scroller) == null ? void 0 : _c.removeClasses([
+      "mdann-reading-gutter",
+      "mdann-gutter-on-left",
+      "mdann-gutter-on-right",
+      "mdann-gutter-suppressed"
+    ]);
+    this.cards.destroy();
+  }
+  // Reconcile the cards against the current annotations, then re-place them.
+  sync(path, annotations, outcomes, settings) {
+    var _a;
+    if (this.destroyed) return;
+    this.path = path;
+    if (!this.resolveElements()) {
+      this.cards.hideAll();
+      return;
+    }
+    this.applyMargins(settings);
+    const numbers = numberComments(annotations, outcomes);
+    const wanted = /* @__PURE__ */ new Set();
+    for (const annotation of annotations) {
+      if (!gutterShows(annotation, settings)) continue;
+      if (((_a = outcomes.get(annotation.id)) == null ? void 0 : _a.status) !== "matched") continue;
+      wanted.add(annotation.id);
+      this.cards.upsert(
+        annotation,
+        gutterSideFor(annotation, settings),
+        numbers.get(annotation.id),
+        settings
+      );
+    }
+    this.cards.prune(wanted);
+    this.requestLayout();
+  }
+  requestLayout() {
+    if (this.destroyed || this.frame !== null) return;
+    const win = this.doc.defaultView;
+    if (!win) return;
+    this.frame = win.requestAnimationFrame(() => {
+      this.frame = null;
+      if (this.destroyed) return;
+      if (!this.resolveElements()) {
+        this.cards.hideAll();
+        return;
+      }
+      this.position(this.measure());
+    });
+  }
+  // Find (and re-home the layers into) the current preview elements. Reading
+  // view rebuilds them on every re-render, so nothing may be cached across
+  // passes; false means this view has no rendered preview right now.
+  resolveElements() {
+    var _a, _b, _c, _d, _e;
+    const scroller = this.container.querySelector(SCROLLER_SELECTOR);
+    const sizer = (_a = scroller == null ? void 0 : scroller.querySelector(SIZER_SELECTOR)) != null ? _a : null;
+    if (!scroller || !sizer) return false;
+    if (this.scroller !== scroller || this.sizer !== sizer) {
+      if (this.sizer && this.sizer !== sizer) {
+        this.sizer.style.removeProperty("padding-left");
+        this.sizer.style.removeProperty("padding-right");
+      }
+      (_b = this.scroller) == null ? void 0 : _b.removeClasses([
+        "mdann-reading-gutter",
+        "mdann-gutter-on-left",
+        "mdann-gutter-on-right",
+        "mdann-gutter-suppressed"
+      ]);
+      (_c = this.observer) == null ? void 0 : _c.disconnect();
+      this.scroller = scroller;
+      this.sizer = sizer;
+      (_d = this.observer) == null ? void 0 : _d.observe(scroller);
+      (_e = this.observer) == null ? void 0 : _e.observe(sizer);
+    }
+    scroller.addClass("mdann-reading-gutter");
+    this.cards.mount(scroller);
+    return true;
+  }
+  applyMargins(settings) {
+    var _a, _b;
+    this.width = clampGutterWidth(settings.gutterWidth);
+    this.activeSides = activeGutterSides(settings);
+    (_a = this.scroller) == null ? void 0 : _a.toggleClass("mdann-gutter-on-left", this.activeSides.left);
+    (_b = this.scroller) == null ? void 0 : _b.toggleClass("mdann-gutter-on-right", this.activeSides.right);
+    this.cards.setLayerWidth(this.width);
+    this.applyPadding();
+  }
+  applyPadding() {
+    const sizer = this.sizer;
+    if (!sizer) return;
+    const set = (prop, on) => {
+      if (on) sizer.style.setProperty(prop, `${this.width}px`, "important");
+      else sizer.style.removeProperty(prop);
+    };
+    set("padding-left", this.activeSides.left && !this.suppressed);
+    set("padding-right", this.activeSides.right && !this.suppressed);
+  }
+  // ── Measure / position ───────────────────────────────────────────────────
+  measure() {
+    var _a;
+    const scroller = this.scroller;
+    const sizer = this.sizer;
+    if (!scroller || !sizer) {
+      return { leftX: 0, leftW: 0, rightX: 0, rightW: 0, suppressed: true, items: [] };
+    }
+    const reserved = (this.activeSides.left ? this.width : 0) + (this.activeSides.right ? this.width : 0);
+    const suppressed = scroller.clientWidth < reserved + MIN_TEXT_WIDTH;
+    if (suppressed) {
+      return { leftX: 0, leftW: 0, rightX: 0, rightW: 0, suppressed, items: [] };
+    }
+    const scrollRect = scroller.getBoundingClientRect();
+    const sizerRect = sizer.getBoundingClientRect();
+    const originX = scrollRect.left - scroller.scrollLeft;
+    const originY = scrollRect.top - scroller.scrollTop;
+    const items = [];
+    for (const [id, card] of this.cards.cards) {
+      const anchor = sizer.querySelector(`[data-mdann-id="${CSS.escape(id)}"]`);
+      const rect = anchor == null ? void 0 : anchor.getBoundingClientRect();
+      if (!rect || rect.height === 0 && rect.width === 0) {
+        items.push({ id, side: card.side, anchorY: null, height: 0 });
+        continue;
+      }
+      this.cards.autoSize(card);
+      items.push({
+        id,
+        side: card.side,
+        anchorY: rect.top - originY,
+        height: card.root.offsetHeight
+      });
+    }
+    const style = (_a = this.doc.defaultView) == null ? void 0 : _a.getComputedStyle(sizer);
+    const strip = (value) => {
+      const n = value === void 0 ? Number.NaN : Number.parseFloat(value);
+      return Number.isFinite(n) && n >= MIN_STRIP2 ? n : this.width;
+    };
+    const rightW = strip(style == null ? void 0 : style.paddingRight);
+    return {
+      leftX: sizerRect.left - originX,
+      leftW: strip(style == null ? void 0 : style.paddingLeft),
+      rightX: sizerRect.right - originX - rightW,
+      rightW,
+      suppressed,
+      items
+    };
+  }
+  position(m) {
+    var _a;
+    if (this.destroyed) return;
+    (_a = this.scroller) == null ? void 0 : _a.toggleClass("mdann-gutter-suppressed", m.suppressed);
+    if (this.suppressed !== m.suppressed) {
+      this.suppressed = m.suppressed;
+      this.applyPadding();
+    }
+    if (m.suppressed) return;
+    this.cards.setLayerBox("left", m.leftX, m.leftW);
+    this.cards.setLayerBox("right", m.rightX, m.rightW);
+    this.cards.place(m.items);
+  }
+};
+
 // src/editor/readingView.ts
 var import_obsidian2 = require("obsidian");
 function collectTextSlices(root) {
@@ -1003,7 +1653,9 @@ function sweepHighlightSpans(root) {
   for (const span of Array.from(root.querySelectorAll(`span.${HIGHLIGHT_CLASS}`))) {
     unwrapHighlightSpan(span);
   }
-  for (const marker of Array.from(root.querySelectorAll(`span.${MARKER_CLASS}`))) {
+  for (const marker of Array.from(
+    root.querySelectorAll(`span.${MARKER_CLASS}, span.${ANCHOR_CLASS}:empty`)
+  )) {
     marker.remove();
   }
 }
@@ -1026,10 +1678,22 @@ var HighlightRenderChild = class extends import_obsidian2.MarkdownRenderChild {
     if (result.status !== "matched") return;
     this.wrapRange(slices, result.start, result.end, classes, styleVars, annotationId, onClick);
   }
+  // Insert an invisible, zero-width element at a point selector's position.
+  // Used when the marker itself is deliberately not drawn but the Reading-view
+  // gutter still needs somewhere to align that comment's card to.
+  tryAnchor(selector, annotationId) {
+    const { text, slices } = collectTextSlices(this.containerEl);
+    if (text === "") return;
+    const result = resolveSelector(text, selector);
+    if (result.status !== "matched") return;
+    const span = this.containerEl.ownerDocument.createElement("span");
+    span.className = ANCHOR_CLASS;
+    span.setAttribute("data-mdann-id", annotationId);
+    if (this.insertAt(slices, result.start, span)) this.markers.push(span);
+  }
   // Resolve a point selector (empty quote) against the rendered text and
   // insert a marker icon at the matched position.
   tryMarker(selector, classes, styleVars, annotationId, label, onClick) {
-    var _a;
     const { text, slices } = collectTextSlices(this.containerEl);
     if (text === "") return;
     const result = resolveSelector(text, selector);
@@ -1051,13 +1715,21 @@ var HighlightRenderChild = class extends import_obsidian2.MarkdownRenderChild {
       e.preventDefault();
       onClick();
     });
+    if (this.insertAt(slices, pos, span)) this.markers.push(span);
+  }
+  // Put `el` at flat-text offset `pos`, splitting the text node it lands
+  // inside. False when the offset falls outside the collected slices, or the
+  // node has already been detached.
+  insertAt(slices, pos, el) {
     const slice = slices.find((s) => pos >= s.start && pos <= s.end);
-    if (!slice) return;
+    if (!slice) return false;
     const local = pos - slice.start;
     const target = local > 0 && local < slice.node.length ? slice.node.splitText(local) : null;
     const anchor = target != null ? target : local === 0 ? slice.node : slice.node.nextSibling;
-    (_a = slice.node.parentNode) == null ? void 0 : _a.insertBefore(span, anchor);
-    this.markers.push(span);
+    const parent = slice.node.parentNode;
+    if (!parent) return false;
+    parent.insertBefore(el, anchor);
+    return true;
   }
   wrapRange(slices, start, end, classes, styleVars, annotationId, onClick) {
     var _a;
@@ -1072,7 +1744,7 @@ var HighlightRenderChild = class extends import_obsidian2.MarkdownRenderChild {
       if (localFrom > 0) target = target.splitText(localFrom);
       if (localTo - localFrom < target.length) target.splitText(localTo - localFrom);
       const span = doc.createElement("span");
-      span.className = classes + " mdann-hl-clickable";
+      span.className = classes;
       span.setAttribute("data-mdann-id", annotationId);
       span.setCssProps(styleVars);
       span.addEventListener("click", () => onClick());
@@ -1134,40 +1806,166 @@ function createReadingPostProcessor(host) {
     const settings = host.settings;
     const commentNumbers = numberComments(state.annotations, state.outcomes);
     const child = new HighlightRenderChild(el);
+    const gutterWants = (annotation) => annotation.type === "comment" ? settings.gutterCommentsEnabled : settings.gutterAnnotationsEnabled;
     for (const annotation of candidates) {
       const outcome = state.outcomes.get(annotation.id);
       if ((outcome == null ? void 0 : outcome.status) !== "matched") continue;
       const selector = captureSelector(state.body, outcome.start, outcome.end);
       if (outcome.start === outcome.end) {
-        if (annotation.type !== "comment" || settings.commentsHiddenEnabled) continue;
-        const styled = settings.commentsFormattingEnabled;
+        if (annotation.type !== "comment") continue;
+        if (settings.commentsHiddenEnabled) {
+          if (gutterWants(annotation)) child.tryAnchor(selector, annotation.id);
+          continue;
+        }
+        const styled2 = settings.commentsFormattingEnabled;
         const number = commentNumbers.get(annotation.id);
         child.tryMarker(
           selector,
-          markerClasses() + (styled ? "" : " mdann-marker-plain"),
-          styled ? highlightStyleVars(annotation.type, annotation.format, settings) : {},
+          markerClasses() + (styled2 ? "" : " mdann-marker-plain"),
+          styled2 ? highlightStyleVars(annotation.type, annotation.format, settings) : {},
           annotation.id,
           number !== void 0 ? String(number) : "",
           () => host.revealAnnotation(ctx.sourcePath, annotation.id)
         );
         continue;
       }
-      if (annotation.type === "highlight" && !settings.annotationFormattingEnabled) continue;
-      if (annotation.type === "comment" && !settings.commentsFormattingEnabled) continue;
+      const styled = annotation.type === "highlight" ? settings.annotationFormattingEnabled : settings.commentsFormattingEnabled;
+      if (!styled) {
+        if (!gutterWants(annotation)) continue;
+        child.tryWrap(
+          selector,
+          `${HIGHLIGHT_CLASS} ${ANCHOR_CLASS}`,
+          {},
+          annotation.id,
+          () => host.revealAnnotation(ctx.sourcePath, annotation.id)
+        );
+        continue;
+      }
       child.tryWrap(
         selector,
-        highlightClasses(annotation.type, annotation.format, settings),
+        `${highlightClasses(annotation.type, annotation.format, settings)} mdann-hl-clickable`,
         highlightStyleVars(annotation.type, annotation.format, settings),
         annotation.id,
         () => host.revealAnnotation(ctx.sourcePath, annotation.id)
       );
     }
     if (child.spanCount > 0) ctx.addChild(child);
+    host.onReadingRendered(ctx.sourcePath);
   };
 }
 
 // src/settingsTab.ts
 var import_obsidian3 = require("obsidian");
+
+// src/ui/toolbarHighlight.ts
+var SKIP_ITEM_TYPES = /* @__PURE__ */ new Set(["separator", "break", "spreader", "group"]);
+var HIGHLIGHT_CLASS2 = "mdann-toolbar-highlight";
+function getNoteToolbarPlugin(app) {
+  var _a, _b;
+  const registry = app.plugins;
+  if (!((_a = registry == null ? void 0 : registry.enabledPlugins) == null ? void 0 : _a.has("note-toolbar"))) return null;
+  const plugin = (_b = registry.plugins) == null ? void 0 : _b["note-toolbar"];
+  return plugin !== null && typeof plugin === "object" ? plugin : null;
+}
+function rawToolbars(app) {
+  var _a, _b;
+  const toolbars = (_b = (_a = getNoteToolbarPlugin(app)) == null ? void 0 : _a.settings) == null ? void 0 : _b.toolbars;
+  return Array.isArray(toolbars) ? toolbars : [];
+}
+function rawItems(toolbar) {
+  return Array.isArray(toolbar.items) ? toolbar.items : [];
+}
+function isNoteToolbarAvailable(app) {
+  return getNoteToolbarPlugin(app) !== null;
+}
+function listToolbars(app) {
+  return rawToolbars(app).filter((t) => typeof t.uuid === "string").map((t) => ({
+    uuid: t.uuid,
+    name: typeof t.name === "string" && t.name !== "" ? t.name : "(untitled toolbar)"
+  }));
+}
+function listHighlightableItems(app, toolbarUuid) {
+  const toolbar = rawToolbars(app).find((t) => t.uuid === toolbarUuid);
+  if (!toolbar) return [];
+  return rawItems(toolbar).filter((i) => typeof i.uuid === "string").filter((i) => {
+    var _a;
+    const type = (_a = i.linkAttr) == null ? void 0 : _a.type;
+    return typeof type === "string" && !SKIP_ITEM_TYPES.has(type);
+  }).filter(
+    (i) => typeof i.label === "string" && i.label !== "" || typeof i.icon === "string" && i.icon !== ""
+  ).map((i) => ({
+    uuid: i.uuid,
+    label: typeof i.label === "string" ? i.label : "",
+    tooltip: typeof i.tooltip === "string" ? i.tooltip : "",
+    icon: typeof i.icon === "string" ? i.icon : ""
+  }));
+}
+function itemDisplayName(item) {
+  return item.label || item.tooltip || item.icon || "(untitled item)";
+}
+var ToolbarHighlighter = class {
+  constructor(app, getTargets) {
+    this.app = app;
+    this.getTargets = getTargets;
+  }
+  // Re-applies every target for the current toggle states. Cheap and
+  // idempotent, so it is safe to call on any workspace event.
+  refresh() {
+    var _a;
+    this.clear();
+    const targets = this.getTargets().filter(
+      (t) => t.active && t.highlight.toolbarUuid !== "" && t.highlight.itemUuid !== ""
+    );
+    if (targets.length === 0) return;
+    const containers = this.toolbarContainers();
+    if (containers.length === 0) return;
+    for (const { highlight } of targets) {
+      const toolbar = rawToolbars(this.app).find((t) => t.uuid === highlight.toolbarUuid);
+      if (!toolbar) continue;
+      const index = rawItems(toolbar).findIndex((i) => i.uuid === highlight.itemUuid);
+      if (index === -1) continue;
+      for (const container of containers) {
+        if (container.id !== highlight.toolbarUuid) continue;
+        const target = (_a = container.querySelector(`li[data-index="${index}"]`)) == null ? void 0 : _a.firstElementChild;
+        if (!(target instanceof HTMLElement)) continue;
+        const dark = target.ownerDocument.body.classList.contains("theme-dark");
+        const { fg, bg } = themedColors(highlight.style, dark);
+        if (fg === "" && bg === "") continue;
+        target.addClass(HIGHLIGHT_CLASS2);
+        if (bg !== "") target.style.setProperty("background-color", bg);
+        if (fg !== "") target.style.setProperty("color", fg);
+      }
+    }
+  }
+  // Removes every colour this plugin applied, wherever it currently lives.
+  clear() {
+    for (const container of this.toolbarContainers()) {
+      for (const el of Array.from(
+        container.querySelectorAll(`.${HIGHLIGHT_CLASS2}`)
+      )) {
+        el.removeClass(HIGHLIGHT_CLASS2);
+        el.style.removeProperty("background-color");
+        el.style.removeProperty("color");
+      }
+    }
+  }
+  // Every rendered Note Toolbar container across the workspace. Walking the
+  // leaves rather than one document means popout windows are covered too.
+  toolbarContainers() {
+    const containers = [];
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      containers.push(
+        ...Array.from(
+          leaf.view.containerEl.querySelectorAll(".cg-note-toolbar-container")
+        )
+      );
+    });
+    return containers;
+  }
+};
+
+// src/settingsTab.ts
+var SLIDER_SAVE_DEBOUNCE_MS = 250;
 function isValidHex2(v) {
   return /^#[0-9a-fA-F]{6}$/.test(v);
 }
@@ -1180,6 +1978,7 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
     this.plugin = plugin;
     this.pendingFormatName = "";
     this.activeTab = "general";
+    this.saveTimer = null;
   }
   isDarkTheme() {
     return this.containerEl.ownerDocument.body.classList.contains("theme-dark");
@@ -1196,7 +1995,8 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
     const tabs = [
       { id: "general", label: "General" },
       { id: "annotations", label: "Annotations" },
-      { id: "comments", label: "Comments" }
+      { id: "comments", label: "Comments" },
+      { id: "gutter", label: "Gutter" }
     ];
     for (const tab of tabs) {
       const btn = tabBar.createEl("button", {
@@ -1214,6 +2014,10 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
     }
     if (this.activeTab === "comments") {
       this.renderCommentsTab(containerEl);
+      return;
+    }
+    if (this.activeTab === "gutter") {
+      this.renderGutterTab(containerEl);
       return;
     }
     this.renderGeneralTab(containerEl);
@@ -1246,6 +2050,168 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
     );
     this.renderNavigationSection(containerEl);
     this.renderFormatTransferSection(containerEl);
+  }
+  // ── Gutter tab ───────────────────────────────────────────────────────────
+  // Everything about the margin gutter in one place: what it shows, which
+  // margin each type uses, how wide it is, and the optional Note Toolbar
+  // items that light up while it is on.
+  renderGutterTab(containerEl) {
+    containerEl.createEl("p", {
+      text: "Notes can be shown as cards in the margin, level with the line they are anchored to, and edited in place \u2014 in Live Preview, Source mode and Reading view. A gutter is dropped automatically while a pane is too narrow to give up the space.",
+      cls: "setting-item-description"
+    });
+    new import_obsidian3.Setting(containerEl).setName("Annotation gutter").setHeading();
+    this.renderToggle(
+      containerEl,
+      "Show annotations in the gutter",
+      `Show each annotation's note as a card in the margin beside its line (also toggled by the "Show/hide annotations in the gutter" command)`,
+      () => this.plugin.settings.gutterAnnotationsEnabled,
+      (v) => {
+        this.plugin.settings.gutterAnnotationsEnabled = v;
+      }
+    );
+    this.renderGutterSide(
+      containerEl,
+      "Annotation gutter side",
+      "Which margin annotation cards sit in",
+      () => this.plugin.settings.gutterAnnotationsSide,
+      (v) => {
+        this.plugin.settings.gutterAnnotationsSide = v;
+      }
+    );
+    new import_obsidian3.Setting(containerEl).setName("Comment gutter").setHeading();
+    this.renderToggle(
+      containerEl,
+      "Show comments in the gutter",
+      'Show each comment as a card in the margin beside its marker (also toggled by the "Show/hide comments in the gutter" command)',
+      () => this.plugin.settings.gutterCommentsEnabled,
+      (v) => {
+        this.plugin.settings.gutterCommentsEnabled = v;
+      }
+    );
+    this.renderGutterSide(
+      containerEl,
+      "Comment gutter side",
+      "Which margin comment cards sit in",
+      () => this.plugin.settings.gutterCommentsSide,
+      (v) => {
+        this.plugin.settings.gutterCommentsSide = v;
+      }
+    );
+    new import_obsidian3.Setting(containerEl).setName("Size").setHeading();
+    new import_obsidian3.Setting(containerEl).setName("Gutter width").setDesc("Room each gutter takes from the note, in pixels").addSlider(
+      (slider) => slider.setLimits(GUTTER_MIN_WIDTH, GUTTER_MAX_WIDTH, 10).setValue(clampGutterWidth(this.plugin.settings.gutterWidth)).setDynamicTooltip().onChange((value) => {
+        this.plugin.settings.gutterWidth = clampGutterWidth(value);
+        this.saveDebounced();
+      })
+    );
+    this.renderToolbarHighlightSection(containerEl);
+  }
+  // Note Toolbar has no API for third-party styling, so the section simply
+  // disappears when it is not installed — there is nothing to point at.
+  renderToolbarHighlightSection(containerEl) {
+    new import_obsidian3.Setting(containerEl).setName("Note Toolbar buttons").setHeading();
+    if (!isNoteToolbarAvailable(this.app)) {
+      containerEl.createEl("p", {
+        text: "Install and enable the Note Toolbar plugin to have one of its buttons change colour while a gutter is showing.",
+        cls: "setting-item-description"
+      });
+      return;
+    }
+    containerEl.createEl("p", {
+      text: 'Pick the toolbar button that runs each "Show/hide \u2026 in the gutter" command and it will take the colours below while that gutter is on, so the toolbar reads as pressed. A gutter that is off leaves its button to Note Toolbar.',
+      cls: "setting-item-description"
+    });
+    this.renderToolbarItemPicker(
+      containerEl,
+      "Annotations button",
+      this.plugin.settings.gutterAnnotationsToolbar
+    );
+    this.renderToolbarItemPicker(
+      containerEl,
+      "Comments button",
+      this.plugin.settings.gutterCommentsToolbar
+    );
+    this.renderToolbarHighlightGrid(containerEl);
+  }
+  // Toolbar + item dropdowns for one of the two buttons. Changing the toolbar
+  // clears the item, since item uuids belong to a single toolbar.
+  renderToolbarItemPicker(containerEl, name, highlight) {
+    new import_obsidian3.Setting(containerEl).setName(name).setDesc("Toolbar, then the button within it").addDropdown((dropdown) => {
+      dropdown.addOption("", "None");
+      for (const toolbar of listToolbars(this.app)) {
+        dropdown.addOption(toolbar.uuid, toolbar.name);
+      }
+      dropdown.setValue(highlight.toolbarUuid).onChange(async (value) => {
+        highlight.toolbarUuid = value;
+        highlight.itemUuid = "";
+        await this.saveAndRefresh();
+        this.display();
+      });
+    }).addDropdown((dropdown) => {
+      const items = highlight.toolbarUuid ? listHighlightableItems(this.app, highlight.toolbarUuid) : [];
+      dropdown.addOption("", items.length === 0 ? "No buttons" : "None");
+      for (const item of items) dropdown.addOption(item.uuid, itemDisplayName(item));
+      dropdown.setDisabled(items.length === 0);
+      dropdown.setValue(highlight.itemUuid).onChange(async (value) => {
+        highlight.itemUuid = value;
+        await this.saveAndRefresh();
+      });
+    });
+  }
+  // The two colour rows, laid out like the format grid so Fr/Bg per theme
+  // read the same way here as everywhere else in these settings.
+  renderToolbarHighlightGrid(containerEl) {
+    const wrap = containerEl.createDiv("mdann-grid-wrap");
+    const table = wrap.createEl("table", { cls: "mdann-grid-table" });
+    const thead = table.createEl("thead");
+    const r1 = thead.createEl("tr");
+    r1.createEl("th", { text: "Button", attr: { rowspan: "2" }, cls: "mdann-grid-name-h" });
+    r1.createEl("th", { text: "Light", attr: { colspan: "2" }, cls: "mdann-grid-sep" });
+    r1.createEl("th", { text: "Dark", attr: { colspan: "2" }, cls: "mdann-grid-sep" });
+    r1.createEl("th", { text: "Example", attr: { rowspan: "2" }, cls: "mdann-grid-sep" });
+    const r2 = thead.createEl("tr");
+    for (let i = 0; i < 4; i++) {
+      r2.createEl("th", { text: i % 2 === 0 ? "Fr" : "Bg", cls: i % 2 === 0 ? "mdann-grid-sep" : "" });
+    }
+    const tbody = table.createEl("tbody");
+    this.renderToolbarHighlightRow(tbody, "Annotations", this.plugin.settings.gutterAnnotationsToolbar);
+    this.renderToolbarHighlightRow(tbody, "Comments", this.plugin.settings.gutterCommentsToolbar);
+  }
+  renderToolbarHighlightRow(tbody, label, highlight) {
+    const tr = tbody.createEl("tr");
+    tr.createEl("td", { text: label, cls: "mdann-grid-name" });
+    let exampleTd = null;
+    const refreshExample = () => {
+      if (!exampleTd) return;
+      exampleTd.empty();
+      const part = highlight.style[this.isDarkTheme() ? "dark" : "light"];
+      this.appendExampleSpan(exampleTd, label, enabledColor2(part.fr), enabledColor2(part.bg), "");
+    };
+    for (const theme of ["light", "dark"]) {
+      for (const field of ["fr", "bg"]) {
+        const td = tr.createEl("td", { cls: field === "fr" ? "mdann-grid-sep" : "" });
+        this.renderColorCell(td, highlight.style[theme][field], refreshExample);
+      }
+    }
+    exampleTd = tr.createEl("td", { cls: "mdann-grid-example mdann-grid-sep" });
+    refreshExample();
+  }
+  saveDebounced() {
+    if (this.saveTimer !== null) window.clearTimeout(this.saveTimer);
+    this.saveTimer = window.setTimeout(() => {
+      this.saveTimer = null;
+      void this.saveAndRefresh();
+    }, SLIDER_SAVE_DEBOUNCE_MS);
+  }
+  // Left/right chooser for one annotation type's gutter cards.
+  renderGutterSide(containerEl, name, desc, getValue, setValue) {
+    new import_obsidian3.Setting(containerEl).setName(name).setDesc(desc).addDropdown(
+      (dropdown) => dropdown.addOption("left", "Left").addOption("right", "Right").setValue(getValue()).onChange(async (value) => {
+        setValue(value === "left" ? "left" : "right");
+        await this.saveAndRefresh();
+      })
+    );
   }
   // The three text ⇄ sidebar navigation behaviours, each independently
   // switchable. All default on.
@@ -1334,6 +2300,11 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
         this.plugin.settings.annotationFormattingEnabled = v;
       }
     );
+    containerEl.createEl("p", {
+      // eslint-disable-next-line obsidianmd/ui/sentence-case -- 'Gutter' names a tab in this settings pane
+      text: "Margin cards for annotations live on the Gutter tab.",
+      cls: "setting-item-description"
+    });
     new import_obsidian3.Setting(containerEl).setName("Annotation Formats").setHeading();
     containerEl.createEl("p", {
       text: "Per-format colors for annotations. Fr = text color, Bg = background. Each checkbox controls whether that color is applied. Uncheck Use to disable a row without deleting it. Renaming a format also updates every note that references the old name.",
@@ -1582,6 +2553,11 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
         this.plugin.settings.commentsFormattingEnabled = v;
       }
     );
+    containerEl.createEl("p", {
+      // eslint-disable-next-line obsidianmd/ui/sentence-case -- 'Gutter' names a tab in this settings pane
+      text: "Margin cards for comments live on the Gutter tab.",
+      cls: "setting-item-description"
+    });
     new import_obsidian3.Setting(containerEl).setName("Comment format").setHeading();
     containerEl.createEl("p", {
       text: "Colors for comment markers (comments are added with no text selected and render as a small icon at the insertion point). Fr = icon color, Bg = background.",
@@ -1980,9 +2956,9 @@ var AnnotationSidebarView = class extends import_obsidian5.ItemView {
     if (isPointComment && commentNumber !== void 0) {
       quote.createEl("span", { text: String(commentNumber), cls: "mdann-card-num" });
     }
-    const excerpt = annotation.selector.exact.length > 120 ? annotation.selector.exact.slice(0, 120) + "\u2026" : annotation.selector.exact;
+    const excerpt2 = annotation.selector.exact.length > 120 ? annotation.selector.exact.slice(0, 120) + "\u2026" : annotation.selector.exact;
     const chip = quote.createEl("span", {
-      text: isPointComment ? "comment marker" : excerpt === "" ? "(empty quote)" : excerpt,
+      text: isPointComment ? "comment marker" : excerpt2 === "" ? "(empty quote)" : excerpt2,
       cls: highlightClasses(annotation.type, annotation.format, this.plugin.settings)
     });
     chip.setCssProps(highlightStyleVars(annotation.type, annotation.format, this.plugin.settings));
@@ -2103,12 +3079,21 @@ var WRITE_DEBOUNCE_MS = 500;
 var DISK_REFRESH_DEBOUNCE_MS = 400;
 var SYNC_DEBOUNCE_MS = 150;
 var TEXT_FLASH_MS = 1200;
+var READING_GUTTER_DEBOUNCE_MS = 60;
+var TOOLBAR_HIGHLIGHT_DELAY_MS = 50;
 var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
   constructor() {
     super(...arguments);
     this.settings = normalizeSettings(null);
     this.states = /* @__PURE__ */ new Map();
     this.editors = /* @__PURE__ */ new Set();
+    // One margin gutter per open editor, created and torn down with it.
+    this.gutters = /* @__PURE__ */ new Map();
+    // The same cards for Reading view, one per markdown leaf currently in
+    // preview mode (keyed by the view's own container element, which outlives
+    // the preview DOM that Obsidian rebuilds on every re-render).
+    this.readingGutters = /* @__PURE__ */ new Map();
+    this.readingGutterTimer = null;
     this.editorTimers = /* @__PURE__ */ new Map();
     this.diskTimers = /* @__PURE__ */ new Map();
     this.changeListeners = /* @__PURE__ */ new Set();
@@ -2209,6 +3194,30 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
         );
       }
     });
+    this.addCommand({
+      id: "toggle-annotation-gutter",
+      name: "Show/hide annotations in the gutter",
+      icon: "panel-right",
+      callback: () => {
+        this.settings.gutterAnnotationsEnabled = !this.settings.gutterAnnotationsEnabled;
+        void this.saveSettings();
+        new import_obsidian6.Notice(
+          `Annotations in the gutter ${this.settings.gutterAnnotationsEnabled ? "shown" : "hidden"}`
+        );
+      }
+    });
+    this.addCommand({
+      id: "toggle-comment-gutter",
+      name: "Show/hide comments in the gutter",
+      icon: "message-square",
+      callback: () => {
+        this.settings.gutterCommentsEnabled = !this.settings.gutterCommentsEnabled;
+        void this.saveSettings();
+        new import_obsidian6.Notice(
+          `Comments in the gutter ${this.settings.gutterCommentsEnabled ? "shown" : "hidden"}`
+        );
+      }
+    });
     this.syncFormatCommands();
     this.registerEvent(
       this.app.workspace.on("editor-menu", (menu, editor, ctx) => {
@@ -2246,8 +3255,27 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
         this.notifyChange();
       })
     );
+    this.toolbarHighlighter = new ToolbarHighlighter(this.app, () => [
+      {
+        highlight: this.settings.gutterAnnotationsToolbar,
+        active: this.settings.gutterAnnotationsEnabled
+      },
+      {
+        highlight: this.settings.gutterCommentsToolbar,
+        active: this.settings.gutterCommentsEnabled
+      }
+    ]);
+    const onWorkspaceChange = () => {
+      this.scheduleReadingGutterSync();
+      window.setTimeout(() => this.toolbarHighlighter.refresh(), TOOLBAR_HIGHLIGHT_DELAY_MS);
+    };
+    this.registerEvent(this.app.workspace.on("layout-change", onWorkspaceChange));
+    this.registerEvent(this.app.workspace.on("active-leaf-change", onWorkspaceChange));
+    this.registerEvent(this.app.workspace.on("css-change", onWorkspaceChange));
+    this.app.workspace.onLayoutReady(onWorkspaceChange);
   }
   onunload() {
+    var _a;
     for (const timer of this.editorTimers.values()) window.clearTimeout(timer);
     this.editorTimers.clear();
     for (const timer of this.diskTimers.values()) window.clearTimeout(timer);
@@ -2256,16 +3284,27 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
       window.clearTimeout(this.syncTimer);
       this.syncTimer = null;
     }
+    if (this.readingGutterTimer !== null) {
+      window.clearTimeout(this.readingGutterTimer);
+      this.readingGutterTimer = null;
+    }
+    for (const gutter of this.gutters.values()) gutter.destroy();
+    this.gutters.clear();
+    for (const gutter of this.readingGutters.values()) gutter.destroy();
+    this.readingGutters.clear();
+    (_a = this.toolbarHighlighter) == null ? void 0 : _a.clear();
     void this.queue.flush().finally(() => this.queue.dispose());
     this.app.workspace.iterateAllLeaves((leaf) => {
       sweepHighlightSpans(leaf.view.containerEl);
     });
   }
   async saveSettings() {
+    var _a;
     await this.saveData(this.settings);
     this.syncFormatCommands();
     for (const view of this.editors) this.decorate(view);
     this.rerenderPreviews();
+    (_a = this.toolbarHighlighter) == null ? void 0 : _a.refresh();
     this.notifyChange();
   }
   // ── Per-format commands ("Apply - <name>", one per format) ───────────────
@@ -2387,14 +3426,24 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
   // ── Editor attachment (called by the CodeMirror ViewPlugin) ──────────────
   attachEditor(view) {
     this.editors.add(view);
+    this.gutters.set(view, new EditorGutter(view, this));
   }
   detachEditor(view) {
+    var _a;
     this.editors.delete(view);
+    (_a = this.gutters.get(view)) == null ? void 0 : _a.destroy();
+    this.gutters.delete(view);
     const timer = this.editorTimers.get(view);
     if (timer !== void 0) {
       window.clearTimeout(timer);
       this.editorTimers.delete(view);
     }
+  }
+  // The editor reflowed or scrolled — re-place the gutter cards without
+  // re-resolving anything.
+  onEditorGeometryChange(view) {
+    var _a;
+    (_a = this.gutters.get(view)) == null ? void 0 : _a.requestLayout();
   }
   scheduleEditorResolve(view, delayMs) {
     const existing = this.editorTimers.get(view);
@@ -2420,6 +3469,7 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
     return false;
   }
   decorate(view) {
+    var _a;
     const path = editorViewPath(view);
     if (path === null) return;
     const state = this.states.get(path);
@@ -2427,6 +3477,7 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
     applyEditorDecorations(view, state.annotations, state.outcomes, this.settings, (id) => {
       this.revealAnnotation(path, id);
     });
+    (_a = this.gutters.get(view)) == null ? void 0 : _a.sync(path, state.annotations, state.outcomes, this.settings);
   }
   decorateAllFor(path) {
     for (const view of this.editors) {
@@ -2439,6 +3490,50 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
       if (view instanceof import_obsidian6.MarkdownView && view.getMode() === "preview") {
         view.previewMode.rerender(true);
       }
+    }
+  }
+  // ── Reading-view gutters ─────────────────────────────────────────────────
+  // A section of a note finished rendering — its highlight spans and markers
+  // (the things the Reading gutter measures) have just moved.
+  onReadingRendered(_path) {
+    this.scheduleReadingGutterSync();
+  }
+  scheduleReadingGutterSync() {
+    if (this.readingGutterTimer !== null) window.clearTimeout(this.readingGutterTimer);
+    this.readingGutterTimer = window.setTimeout(() => {
+      this.readingGutterTimer = null;
+      this.syncReadingGutters();
+    }, READING_GUTTER_DEBOUNCE_MS);
+  }
+  // Create a gutter for every markdown leaf now in Reading view, refresh the
+  // ones that already exist, and tear down any whose leaf has closed or
+  // switched back to editing.
+  syncReadingGutters() {
+    var _a;
+    const live = /* @__PURE__ */ new Set();
+    for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+      const view = leaf.view;
+      if (!(view instanceof import_obsidian6.MarkdownView) || view.getMode() !== "preview") continue;
+      const path = (_a = view.file) == null ? void 0 : _a.path;
+      if (path === void 0) continue;
+      const state = this.states.get(path);
+      if (!state) {
+        void this.ensureFileState(path);
+        continue;
+      }
+      const key = view.contentEl;
+      live.add(key);
+      let gutter = this.readingGutters.get(key);
+      if (!gutter) {
+        gutter = new ReadingGutter(key, this);
+        this.readingGutters.set(key, gutter);
+      }
+      gutter.sync(path, state.annotations, state.outcomes, this.settings);
+    }
+    for (const [key, gutter] of this.readingGutters) {
+      if (live.has(key)) continue;
+      gutter.destroy();
+      this.readingGutters.delete(key);
     }
   }
   // ── Annotation CRUD (used by commands and the sidebar) ───────────────────
@@ -2661,6 +3756,14 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
     if (!this.settings.textClickJumpsToSidebar) return;
     void this.revealInSidebar(path, id, { flash: true, focus: true, activate: true });
   }
+  // A gutter card was clicked: scroll the sidebar to the same entry, but only
+  // when it is already open. Opening it would move panes around underneath
+  // the click, and focusing its comment box would steal the caret from the
+  // card the user just clicked into — so this reveals without doing either.
+  revealFromGutter(path, id) {
+    if (!this.hasSidebar()) return;
+    void this.revealInSidebar(path, id, { flash: true, focus: false, activate: false });
+  }
   // Cursor moved in an editor — when sync is on and the sidebar is open, scroll
   // it to the nearest entry.
   onEditorSelectionChange(view) {
@@ -2742,5 +3845,6 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
   }
   notifyChange() {
     for (const listener of this.changeListeners) listener();
+    this.scheduleReadingGutterSync();
   }
 };

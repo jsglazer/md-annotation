@@ -53,6 +53,9 @@ export interface EditorHost {
 	revealAnnotation(path: string, id: string): void;
 	// The cursor/selection moved — used by the "Sync text and sidebar" toggle.
 	onEditorSelectionChange(view: EditorView): void;
+	// The editor reflowed, resized, or scrolled a new stretch of document into
+	// view — the margin gutter re-places its cards from the new geometry.
+	onEditorGeometryChange(view: EditorView): void;
 }
 
 export const EDITOR_RESOLVE_DEBOUNCE_MS = 250;
@@ -68,10 +71,17 @@ export function buildEditorExtension(host: EditorHost): Extension {
 			update(update: {
 				docChanged: boolean;
 				selectionSet: boolean;
+				geometryChanged: boolean;
+				viewportChanged: boolean;
 				view: EditorView;
 			}): void {
 				if (update.docChanged) host.scheduleEditorResolve(update.view, EDITOR_RESOLVE_DEBOUNCE_MS);
 				else if (update.selectionSet) host.onEditorSelectionChange(update.view);
+				// Resolution is debounced, but the cards already on screen must
+				// keep up with the text they point at, so this is not.
+				if (update.geometryChanged || update.viewportChanged) {
+					host.onEditorGeometryChange(update.view);
+				}
 			}
 
 			destroy(): void {

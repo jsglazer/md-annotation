@@ -1,9 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
+	GUTTER_DEFAULT_WIDTH,
+	GUTTER_MAX_WIDTH,
+	GUTTER_MIN_WIDTH,
+	GUTTER_STYLE_PROPS,
+	clampGutterWidth,
 	defaultSettings,
 	exportFormats,
 	firstUsedFormatName,
 	formatClass,
+	gutterStyleVars,
 	highlightClasses,
 	highlightStyleVars,
 	isValidFontSize,
@@ -14,6 +20,7 @@ import {
 	normalizeSettings,
 	partStyle,
 	resolveStyle,
+	themedColors,
 	usableFormatNames,
 } from '../src/core/settings';
 
@@ -196,6 +203,94 @@ describe('navigation toggles', () => {
 	});
 });
 
+describe('gutter settings', () => {
+	it('defaults both types to the right margin, switched on', () => {
+		const s = defaultSettings();
+		expect(s.gutterAnnotationsEnabled).toBe(true);
+		expect(s.gutterCommentsEnabled).toBe(true);
+		expect(s.gutterAnnotationsSide).toBe('right');
+		expect(s.gutterCommentsSide).toBe('right');
+		expect(s.gutterWidth).toBe(GUTTER_DEFAULT_WIDTH);
+	});
+
+	it('reads stored toggles and sides, ignoring junk', () => {
+		const s = normalizeSettings({
+			gutterAnnotationsEnabled: false,
+			gutterCommentsEnabled: 'yes',
+			gutterAnnotationsSide: 'left',
+			gutterCommentsSide: 'middle',
+		});
+		expect(s.gutterAnnotationsEnabled).toBe(false);
+		expect(s.gutterCommentsEnabled).toBe(true);
+		expect(s.gutterAnnotationsSide).toBe('left');
+		expect(s.gutterCommentsSide).toBe('right');
+	});
+
+	it('clamps a stored width into range and rejects non-numbers', () => {
+		expect(normalizeSettings({ gutterWidth: 10 }).gutterWidth).toBe(GUTTER_MIN_WIDTH);
+		expect(normalizeSettings({ gutterWidth: 9000 }).gutterWidth).toBe(GUTTER_MAX_WIDTH);
+		expect(normalizeSettings({ gutterWidth: 231.6 }).gutterWidth).toBe(232);
+		expect(normalizeSettings({ gutterWidth: '300' }).gutterWidth).toBe(GUTTER_DEFAULT_WIDTH);
+		expect(clampGutterWidth(Number.NaN)).toBe(GUTTER_DEFAULT_WIDTH);
+	});
+});
+
+describe('gutterStyleVars', () => {
+	// Unlike highlightStyleVars, a disabled color is OMITTED rather than turned
+	// into a keyword — styles.css needs the var() fallback to supply a usable
+	// border color when the format sets no text color.
+	it('omits disabled colors so the CSS fallback applies', () => {
+		const s = defaultSettings();
+		expect(gutterStyleVars('highlight', 'Yellow', s)).toEqual({
+			'--mdann-g-light-bg': '#fff3a3',
+			'--mdann-g-dark-bg': '#7a6f1f',
+		});
+	});
+
+	it('emits the text color, which styles.css also uses as the border color', () => {
+		const s = defaultSettings();
+		const yellow = s.formatStyles['Yellow'];
+		if (!yellow) throw new Error('default format missing');
+		yellow.light.fr = { enabled: true, color: '#aa0000' };
+		const vars = gutterStyleVars('highlight', 'Yellow', s);
+		expect(vars['--mdann-g-light-fg']).toBe('#aa0000');
+		expect(vars['--mdann-g-dark-fg']).toBeUndefined();
+	});
+
+	it('never emits invalid color or size values', () => {
+		const s = defaultSettings();
+		const yellow = s.formatStyles['Yellow'];
+		if (!yellow) throw new Error('default format missing');
+		yellow.light.bg.color = 'red; } body { display:none';
+		yellow.fontSize = '12px; color: red';
+		const vars = gutterStyleVars('highlight', 'Yellow', s);
+		expect(vars['--mdann-g-light-bg']).toBeUndefined();
+		expect(vars['font-size']).toBeUndefined();
+		yellow.fontSize = '0.9em';
+		expect(gutterStyleVars('highlight', 'Yellow', s)['font-size']).toBe('0.9em');
+	});
+
+	it('uses the dedicated comment style for comments', () => {
+		const s = defaultSettings();
+		expect(gutterStyleVars('comment', '', s)).toEqual({
+			'--mdann-g-light-bg': '#c8e6c9',
+			'--mdann-g-dark-bg': '#2e5d33',
+		});
+	});
+
+	it('covers every property it can emit, so stale ones can be cleared', () => {
+		const s = defaultSettings();
+		const yellow = s.formatStyles['Yellow'];
+		if (!yellow) throw new Error('default format missing');
+		yellow.light.fr = { enabled: true, color: '#111111' };
+		yellow.dark.fr = { enabled: true, color: '#eeeeee' };
+		yellow.fontSize = '11px';
+		expect(Object.keys(gutterStyleVars('highlight', 'Yellow', s)).sort()).toEqual(
+			[...GUTTER_STYLE_PROPS].sort(),
+		);
+	});
+});
+
 describe('format export / import', () => {
 	it('round-trips formats and the comment style', () => {
 		const s = defaultSettings();
@@ -238,5 +333,58 @@ describe('format export / import', () => {
 		const result = mergeFormats({ Key: makeFormatStyle() }, { Define: makeFormatStyle() }, 'replace');
 		expect(Object.keys(result.formatStyles)).toEqual(['Define']);
 		expect(result.skipped).toEqual([]);
+	});
+});
+
+describe('gutter toolbar highlight', () => {
+	it('defaults to no target and a usable colour pair', () => {
+		const s = defaultSettings();
+		expect(s.gutterAnnotationsToolbar.toolbarUuid).toBe('');
+		expect(s.gutterAnnotationsToolbar.itemUuid).toBe('');
+		expect(s.gutterCommentsToolbar.toolbarUuid).toBe('');
+		expect(themedColors(s.gutterAnnotationsToolbar.style, false).bg).toBe('#fff3a3');
+		expect(themedColors(s.gutterCommentsToolbar.style, true).bg).toBe('#2e5d33');
+	});
+
+	it('reads a stored target and style back', () => {
+		const s = normalizeSettings({
+			gutterAnnotationsToolbar: {
+				toolbarUuid: 'tb-1',
+				itemUuid: 'item-7',
+				style: {
+					light: { fr: { enabled: true, color: '#112233' }, bg: { enabled: false, color: '' } },
+					dark: { fr: { enabled: true, color: '#445566' }, bg: { enabled: false, color: '' } },
+				},
+			},
+		});
+		expect(s.gutterAnnotationsToolbar.toolbarUuid).toBe('tb-1');
+		expect(s.gutterAnnotationsToolbar.itemUuid).toBe('item-7');
+		expect(themedColors(s.gutterAnnotationsToolbar.style, false)).toEqual({
+			fg: '#112233',
+			bg: '',
+		});
+		expect(themedColors(s.gutterAnnotationsToolbar.style, true).fg).toBe('#445566');
+	});
+
+	it('falls back to defaults for malformed values without half-writing a target', () => {
+		const s = normalizeSettings({
+			gutterAnnotationsToolbar: 'nope',
+			gutterCommentsToolbar: { toolbarUuid: 42, itemUuid: null, style: 'nope' },
+		});
+		expect(s.gutterAnnotationsToolbar).toEqual(defaultSettings().gutterAnnotationsToolbar);
+		expect(s.gutterCommentsToolbar.toolbarUuid).toBe('');
+		expect(s.gutterCommentsToolbar.itemUuid).toBe('');
+		expect(s.gutterCommentsToolbar.style).toEqual(defaultSettings().gutterCommentsToolbar.style);
+	});
+});
+
+describe('themedColors', () => {
+	it('drops disabled and invalid colours', () => {
+		const style = {
+			light: { fr: { enabled: false, color: '#112233' }, bg: { enabled: true, color: 'zzz' } },
+			dark: { fr: { enabled: true, color: '#abcdef' }, bg: { enabled: true, color: '#000000' } },
+		};
+		expect(themedColors(style, false)).toEqual({ fg: '', bg: '' });
+		expect(themedColors(style, true)).toEqual({ fg: '#abcdef', bg: '#000000' });
 	});
 });

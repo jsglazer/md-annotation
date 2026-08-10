@@ -17,6 +17,7 @@ import { captureSelector, resolveSelector } from '../core/matcher';
 import { numberComments } from '../core/ordering';
 import type { MdAnnotationSettings } from '../core/settings';
 import {
+	ANCHOR_CLASS,
 	HIGHLIGHT_CLASS,
 	MARKER_CLASS,
 	highlightClasses,
@@ -32,6 +33,9 @@ export interface ReadingHost {
 	// Annotated text (highlight span or comment marker) was clicked in Reading
 	// view — reveal and focus the matching sidebar entry.
 	revealAnnotation(path: string, id: string): void;
+	// A section of this note finished rendering, so the elements the Reading
+	// view gutter measures now exist (or have moved) — re-place its cards.
+	onReadingRendered(path: string): void;
 }
 
 interface TextSlice {
@@ -65,15 +69,17 @@ export function unwrapHighlightSpan(span: Element): void {
 	parent.normalize();
 }
 
-// Removes every highlight span and comment marker the plugin has ever added
-// to `root` (used on plugin unload, when render children may already be
-// detached). Wrap spans are unwrapped (their text belongs to the note);
-// markers are removed outright (their icon content is ours).
+// Removes every highlight span, comment marker and gutter anchor the plugin has
+// ever added to `root` (used on plugin unload, when render children may already
+// be detached). Wrap spans are unwrapped (their text belongs to the note);
+// markers and anchors are removed outright (their content is ours).
 export function sweepHighlightSpans(root: ParentNode): void {
 	for (const span of Array.from(root.querySelectorAll(`span.${HIGHLIGHT_CLASS}`))) {
 		unwrapHighlightSpan(span);
 	}
-	for (const marker of Array.from(root.querySelectorAll(`span.${MARKER_CLASS}`))) {
+	for (const marker of Array.from(
+		root.querySelectorAll(`span.${MARKER_CLASS}, span.${ANCHOR_CLASS}:empty`),
+	)) {
 		marker.remove();
 	}
 }
@@ -101,6 +107,20 @@ class HighlightRenderChild extends MarkdownRenderChild {
 		const result = resolveSelector(text, selector);
 		if (result.status !== 'matched') return;
 		this.wrapRange(slices, result.start, result.end, classes, styleVars, annotationId, onClick);
+	}
+
+	// Insert an invisible, zero-width element at a point selector's position.
+	// Used when the marker itself is deliberately not drawn but the Reading-view
+	// gutter still needs somewhere to align that comment's card to.
+	tryAnchor(selector: TextQuoteSelector, annotationId: string): void {
+		const { text, slices } = collectTextSlices(this.containerEl);
+		if (text === '') return;
+		const result = resolveSelector(text, selector);
+		if (result.status !== 'matched') return;
+		const span = this.containerEl.ownerDocument.createElement('span');
+		span.className = ANCHOR_CLASS;
+		span.setAttribute('data-mdann-id', annotationId);
+		if (this.insertAt(slices, result.start, span)) this.markers.push(span);
 	}
 
 	// Resolve a point selector (empty quote) against the rendered text and
@@ -136,14 +156,22 @@ class HighlightRenderChild extends MarkdownRenderChild {
 			onClick();
 		});
 
-		// Find the text node containing the position and split it there.
+		if (this.insertAt(slices, pos, span)) this.markers.push(span);
+	}
+
+	// Put `el` at flat-text offset `pos`, splitting the text node it lands
+	// inside. False when the offset falls outside the collected slices, or the
+	// node has already been detached.
+	private insertAt(slices: TextSlice[], pos: number, el: HTMLElement): boolean {
 		const slice = slices.find((s) => pos >= s.start && pos <= s.end);
-		if (!slice) return;
+		if (!slice) return false;
 		const local = pos - slice.start;
 		const target = local > 0 && local < slice.node.length ? slice.node.splitText(local) : null;
 		const anchor = target ?? (local === 0 ? slice.node : slice.node.nextSibling);
-		slice.node.parentNode?.insertBefore(span, anchor);
-		this.markers.push(span);
+		const parent = slice.node.parentNode;
+		if (!parent) return false;
+		parent.insertBefore(el, anchor);
+		return true;
 	}
 
 	private wrapRange(
@@ -169,7 +197,7 @@ class HighlightRenderChild extends MarkdownRenderChild {
 			if (localTo - localFrom < target.length) target.splitText(localTo - localFrom);
 
 			const span = doc.createElement('span');
-			span.className = classes + ' mdann-hl-clickable';
+			span.className = classes;
 			span.setAttribute('data-mdann-id', annotationId);
 			span.setCssProps(styleVars);
 			span.addEventListener('click', () => onClick());
@@ -239,6 +267,15 @@ export function createReadingPostProcessor(host: ReadingHost) {
 		const settings = host.settings;
 		const commentNumbers = numberComments(state.annotations, state.outcomes);
 		const child = new HighlightRenderChild(el);
+		// Whether this annotation's card is wanted in the Reading-view gutter.
+		// When it is, something carrying its id has to end up in the rendered
+		// note even if the annotation itself is not being drawn — otherwise the
+		// gutter has nothing to align the card to.
+		const gutterWants = (annotation: Annotation): boolean =>
+			annotation.type === 'comment'
+				? settings.gutterCommentsEnabled
+				: settings.gutterAnnotationsEnabled;
+
 		for (const annotation of candidates) {
 			const outcome = state.outcomes.get(annotation.id);
 			if (outcome?.status !== 'matched') continue;
@@ -248,7 +285,11 @@ export function createReadingPostProcessor(host: ReadingHost) {
 			const selector = captureSelector(state.body, outcome.start, outcome.end);
 			if (outcome.start === outcome.end) {
 				// Point comment marker.
-				if (annotation.type !== 'comment' || settings.commentsHiddenEnabled) continue;
+				if (annotation.type !== 'comment') continue;
+				if (settings.commentsHiddenEnabled) {
+					if (gutterWants(annotation)) child.tryAnchor(selector, annotation.id);
+					continue;
+				}
 				const styled = settings.commentsFormattingEnabled;
 				const number = commentNumbers.get(annotation.id);
 				child.tryMarker(
@@ -261,16 +302,34 @@ export function createReadingPostProcessor(host: ReadingHost) {
 				);
 				continue;
 			}
-			if (annotation.type === 'highlight' && !settings.annotationFormattingEnabled) continue;
-			if (annotation.type === 'comment' && !settings.commentsFormattingEnabled) continue;
+			const styled =
+				annotation.type === 'highlight'
+					? settings.annotationFormattingEnabled
+					: settings.commentsFormattingEnabled;
+			if (!styled) {
+				// Formatting is off for this type: wrap the text in an unstyled
+				// span so the gutter (and a click-to-sidebar) still has a
+				// handle on it, or skip it entirely when neither is wanted.
+				if (!gutterWants(annotation)) continue;
+				child.tryWrap(
+					selector,
+					`${HIGHLIGHT_CLASS} ${ANCHOR_CLASS}`,
+					{},
+					annotation.id,
+					() => host.revealAnnotation(ctx.sourcePath, annotation.id),
+				);
+				continue;
+			}
 			child.tryWrap(
 				selector,
-				highlightClasses(annotation.type, annotation.format, settings),
+				`${highlightClasses(annotation.type, annotation.format, settings)} mdann-hl-clickable`,
 				highlightStyleVars(annotation.type, annotation.format, settings),
 				annotation.id,
 				() => host.revealAnnotation(ctx.sourcePath, annotation.id),
 			);
 		}
 		if (child.spanCount > 0) ctx.addChild(child);
+		// Whatever was rendered here, the gutter's measurements are now stale.
+		host.onReadingRendered(ctx.sourcePath);
 	};
 }

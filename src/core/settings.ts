@@ -31,6 +31,28 @@ export interface FormatStyle extends ThemedPartStyles {
 	fontSize: string;
 }
 
+// Which margin a gutter card sits in. Annotations and comments choose
+// independently, so notes and highlights can occupy opposite margins.
+export type GutterSide = 'left' | 'right';
+
+export const GUTTER_MIN_WIDTH = 140;
+export const GUTTER_MAX_WIDTH = 480;
+export const GUTTER_DEFAULT_WIDTH = 220;
+
+// One Note Toolbar item to recolour while a gutter is switched on. The two
+// uuids identify the item (toolbar → item); the style is the colour pair
+// applied while that gutter is showing — an item whose gutter is off is left
+// entirely to Note Toolbar's own styling, so "on" reads as the exception.
+export interface ToolbarHighlight {
+	toolbarUuid: string;
+	itemUuid: string;
+	style: ThemedPartStyles;
+}
+
+export function makeToolbarHighlight(light: PartStyle, dark: PartStyle): ToolbarHighlight {
+	return { toolbarUuid: '', itemUuid: '', style: { light, dark } };
+}
+
 export interface MdAnnotationSettings {
 	author: string;
 	// Keyed by format name. The annotation JSON "format" field stores the name.
@@ -40,6 +62,20 @@ export interface MdAnnotationSettings {
 	annotationFormattingEnabled: boolean;
 	commentsFormattingEnabled: boolean;
 	commentsHiddenEnabled: boolean;
+
+	// Margin gutter (Live Preview / Source mode). Each type is switched on
+	// separately — also by the "Show/hide … in the gutter" commands — and picks
+	// its own margin. The width applies to whichever margins are in use.
+	gutterAnnotationsEnabled: boolean;
+	gutterCommentsEnabled: boolean;
+	gutterAnnotationsSide: GutterSide;
+	gutterCommentsSide: GutterSide;
+	gutterWidth: number;
+
+	// Note Toolbar items that follow the two gutter toggles, so a toolbar shows
+	// at a glance which gutters are on. Inert until an item is chosen.
+	gutterAnnotationsToolbar: ToolbarHighlight;
+	gutterCommentsToolbar: ToolbarHighlight;
 
 	// Navigation toggles (General tab), all on by default. Each governs one
 	// direction of the text ⇄ sidebar link; the "Sync text and sidebar" command
@@ -86,6 +122,19 @@ export function defaultSettings(): MdAnnotationSettings {
 		annotationFormattingEnabled: true,
 		commentsFormattingEnabled: true,
 		commentsHiddenEnabled: false,
+		gutterAnnotationsEnabled: true,
+		gutterCommentsEnabled: true,
+		gutterAnnotationsSide: 'right',
+		gutterCommentsSide: 'right',
+		gutterWidth: GUTTER_DEFAULT_WIDTH,
+		gutterAnnotationsToolbar: makeToolbarHighlight(
+			partStyle('', '#fff3a3'),
+			partStyle('', '#7a6f1f'),
+		),
+		gutterCommentsToolbar: makeToolbarHighlight(
+			partStyle('', '#c8e6c9'),
+			partStyle('', '#2e5d33'),
+		),
 		syncTextAndSidebar: true,
 		sidebarClickJumpsToText: true,
 		textClickJumpsToSidebar: true,
@@ -106,6 +155,19 @@ function asRecord(v: unknown): Record<string, unknown> | null {
 
 function readString(v: unknown): string {
 	return typeof v === 'string' ? v : '';
+}
+
+// Anything that is not literally 'left' falls back to the default margin.
+function readGutterSide(v: unknown, fallback: GutterSide): GutterSide {
+	return v === 'left' || v === 'right' ? v : fallback;
+}
+
+// The gutter has to stay wide enough to read and narrow enough to leave the
+// note usable, so an out-of-range or non-finite stored width is clamped rather
+// than trusted.
+export function clampGutterWidth(value: number): number {
+	if (!Number.isFinite(value)) return GUTTER_DEFAULT_WIDTH;
+	return Math.min(GUTTER_MAX_WIDTH, Math.max(GUTTER_MIN_WIDTH, Math.round(value)));
 }
 
 function readColorOption(v: unknown): ColorOption {
@@ -133,6 +195,19 @@ function readThemedPartStyles(v: unknown): ThemedPartStyles {
 	return { light: readPartStyle(r.light), dark: readPartStyle(r.dark) };
 }
 
+// One stored Note Toolbar highlight. An unreadable value keeps the default
+// colours but never a half-written target, so a corrupt uuid pair simply
+// leaves the highlight switched off rather than pointing somewhere arbitrary.
+function readToolbarHighlight(v: unknown, fallback: ToolbarHighlight): ToolbarHighlight {
+	const r = asRecord(v);
+	if (!r) return fallback;
+	return {
+		toolbarUuid: readString(r.toolbarUuid),
+		itemUuid: readString(r.itemUuid),
+		style: asRecord(r.style) ? readThemedPartStyles(r.style) : fallback.style,
+	};
+}
+
 function readFormatStyle(v: unknown): FormatStyle {
 	const r = asRecord(v);
 	if (!r) return makeFormatStyle();
@@ -155,6 +230,8 @@ export function normalizeSettings(raw: unknown): MdAnnotationSettings {
 		'annotationFormattingEnabled',
 		'commentsFormattingEnabled',
 		'commentsHiddenEnabled',
+		'gutterAnnotationsEnabled',
+		'gutterCommentsEnabled',
 		'syncTextAndSidebar',
 		'sidebarClickJumpsToText',
 		'textClickJumpsToSidebar',
@@ -162,6 +239,15 @@ export function normalizeSettings(raw: unknown): MdAnnotationSettings {
 	for (const key of booleanKeys) {
 		if (typeof r[key] === 'boolean') s[key] = r[key];
 	}
+
+	s.gutterAnnotationsSide = readGutterSide(r.gutterAnnotationsSide, s.gutterAnnotationsSide);
+	s.gutterCommentsSide = readGutterSide(r.gutterCommentsSide, s.gutterCommentsSide);
+	if (typeof r.gutterWidth === 'number') s.gutterWidth = clampGutterWidth(r.gutterWidth);
+	s.gutterAnnotationsToolbar = readToolbarHighlight(
+		r.gutterAnnotationsToolbar,
+		s.gutterAnnotationsToolbar,
+	);
+	s.gutterCommentsToolbar = readToolbarHighlight(r.gutterCommentsToolbar, s.gutterCommentsToolbar);
 
 	const styles = asRecord(r.formatStyles);
 	if (styles) {
@@ -330,6 +416,11 @@ export function isValidFontSize(value: string): boolean {
 export const HIGHLIGHT_CLASS = 'mdann-hl';
 export const COMMENT_CLASS = 'mdann-comment';
 export const MARKER_CLASS = 'mdann-marker';
+// An element inserted purely so the Reading-view gutter has something to
+// measure: it carries the annotation id but no visible styling of its own,
+// used where the annotation itself is deliberately not being drawn (formatting
+// switched off, or comment markers hidden) yet its card is still wanted.
+export const ANCHOR_CLASS = 'mdann-anchor';
 
 export function formatClass(formatName: string): string {
 	return 'mdann-f-' + formatName.replace(/[^a-zA-Z0-9_-]/g, '-');
@@ -377,6 +468,14 @@ function enabledColor(opt: ColorOption): string {
 	return opt.enabled && isValidHex(opt.color) ? opt.color : '';
 }
 
+// The Fr/Bg pair a themed style contributes for the active theme. Both are ''
+// when nothing is enabled or the stored hex is invalid, which callers read as
+// "leave this element alone".
+export function themedColors(style: ThemedPartStyles, dark: boolean): { fg: string; bg: string } {
+	const part = dark ? style.dark : style.light;
+	return { fg: enabledColor(part.fr), bg: enabledColor(part.bg) };
+}
+
 // Inline CSS custom properties for one highlight/marker. Static rules in
 // styles.css consume these per theme, so colors follow light/dark switches.
 // Only validated hex values (and a validated font-size) are ever emitted —
@@ -411,6 +510,43 @@ export function highlightStyleText(
 		.map(([prop, value]) => `${prop}: ${value};`)
 		.join(' ');
 }
+
+// Custom properties for one gutter card. Deliberately NOT the same set as
+// highlightStyleVars: that one substitutes the keywords 'inherit'/'transparent'
+// for disabled colors, which cannot serve as a border color. Here a disabled
+// color is simply omitted so the CSS `var(--…, fallback)` in styles.css takes
+// over — a card with no Fr color still gets a visible border from the theme.
+// The card's border colour is the format's Fr (text) colour by design.
+export function gutterStyleVars(
+	annotationType: 'highlight' | 'comment',
+	formatName: string,
+	settings: MdAnnotationSettings,
+): Record<string, string> {
+	const resolved = resolveStyle(annotationType, formatName, settings);
+	if (!resolved) return {};
+	const { style, fontSize } = resolved;
+	const vars: Record<string, string> = {};
+	const put = (name: string, opt: ColorOption): void => {
+		const color = enabledColor(opt);
+		if (color !== '') vars[name] = color;
+	};
+	put('--mdann-g-light-fg', style.light.fr);
+	put('--mdann-g-light-bg', style.light.bg);
+	put('--mdann-g-dark-fg', style.dark.fr);
+	put('--mdann-g-dark-bg', style.dark.bg);
+	if (isValidFontSize(fontSize)) vars['font-size'] = fontSize.trim();
+	return vars;
+}
+
+// Every property gutterStyleVars can emit — the card element is reused across
+// renders, so stale ones must be cleared before the new set is applied.
+export const GUTTER_STYLE_PROPS = [
+	'--mdann-g-light-fg',
+	'--mdann-g-light-bg',
+	'--mdann-g-dark-fg',
+	'--mdann-g-dark-bg',
+	'font-size',
+] as const;
 
 // The CSS class list for one annotation's highlight span/decoration.
 export function highlightClasses(

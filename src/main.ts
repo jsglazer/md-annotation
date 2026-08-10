@@ -24,21 +24,30 @@ import { WriteQueue } from './core/queue';
 import type { MdAnnotationSettings } from './core/settings';
 import { isUnsafeKey, normalizeSettings, usableFormatNames } from './core/settings';
 import type { Annotation, AnnotationType, TextQuoteSelector } from './core/types';
+import { EditorGutter } from './editor/gutterLayer';
 import {
 	applyEditorDecorations,
 	buildEditorExtension,
 	editorViewPath,
 } from './editor/livePreview';
+import { ReadingGutter } from './editor/readingGutter';
 import { createReadingPostProcessor, sweepHighlightSpans } from './editor/readingView';
 import { MdAnnotationSettingTab } from './settingsTab';
 import type { FileAnnotationState } from './state';
 import { FormatSuggestModal } from './ui/formatSuggest';
 import { AnnotationSidebarView, SIDEBAR_VIEW_TYPE } from './ui/sidebar';
+import { ToolbarHighlighter } from './ui/toolbarHighlight';
 
 const WRITE_DEBOUNCE_MS = 500;
 const DISK_REFRESH_DEBOUNCE_MS = 400;
 const SYNC_DEBOUNCE_MS = 150;
 const TEXT_FLASH_MS = 1200;
+// Reading view renders section by section, so a note produces a burst of
+// post-processor calls; the gutter only needs one pass once they settle.
+const READING_GUTTER_DEBOUNCE_MS = 60;
+// Note Toolbar renders its own DOM per leaf/file/mode. A short delay lets that
+// finish first — handler order across two separate plugins is not guaranteed.
+const TOOLBAR_HIGHLIGHT_DELAY_MS = 50;
 
 export default class MdAnnotationPlugin extends Plugin {
 	settings: MdAnnotationSettings = normalizeSettings(null);
@@ -48,6 +57,15 @@ export default class MdAnnotationPlugin extends Plugin {
 
 	private states = new Map<string, FileAnnotationState>();
 	private editors = new Set<EditorView>();
+	// One margin gutter per open editor, created and torn down with it.
+	private gutters = new Map<EditorView, EditorGutter>();
+	// The same cards for Reading view, one per markdown leaf currently in
+	// preview mode (keyed by the view's own container element, which outlives
+	// the preview DOM that Obsidian rebuilds on every re-render).
+	private readingGutters = new Map<HTMLElement, ReadingGutter>();
+	private readingGutterTimer: number | null = null;
+	// Recolours the Note Toolbar items bound to the two gutter toggles.
+	private toolbarHighlighter!: ToolbarHighlighter;
 	private editorTimers = new Map<EditorView, number>();
 	private diskTimers = new Map<string, number>();
 	private changeListeners = new Set<() => void>();
@@ -155,6 +173,33 @@ export default class MdAnnotationPlugin extends Plugin {
 			},
 		});
 
+		// The two gutter toggles are persisted settings, so command and settings
+		// dropdown are one state (as with the sync toggle above).
+		this.addCommand({
+			id: 'toggle-annotation-gutter',
+			name: 'Show/hide annotations in the gutter',
+			icon: 'panel-right',
+			callback: () => {
+				this.settings.gutterAnnotationsEnabled = !this.settings.gutterAnnotationsEnabled;
+				void this.saveSettings();
+				new Notice(
+					`Annotations in the gutter ${this.settings.gutterAnnotationsEnabled ? 'shown' : 'hidden'}`,
+				);
+			},
+		});
+		this.addCommand({
+			id: 'toggle-comment-gutter',
+			name: 'Show/hide comments in the gutter',
+			icon: 'message-square',
+			callback: () => {
+				this.settings.gutterCommentsEnabled = !this.settings.gutterCommentsEnabled;
+				void this.saveSettings();
+				new Notice(
+					`Comments in the gutter ${this.settings.gutterCommentsEnabled ? 'shown' : 'hidden'}`,
+				);
+			},
+		});
+
 		// One "Apply - <name>" command per format, kept in sync as formats change.
 		this.syncFormatCommands();
 
@@ -198,6 +243,29 @@ export default class MdAnnotationPlugin extends Plugin {
 				this.notifyChange();
 			}),
 		);
+
+		// Reading-view gutters and the Note Toolbar highlight both follow the
+		// workspace rather than any one file: a leaf switching between Reading
+		// and editing modes, a new pane, or a popout window all change what
+		// exists to decorate.
+		this.toolbarHighlighter = new ToolbarHighlighter(this.app, () => [
+			{
+				highlight: this.settings.gutterAnnotationsToolbar,
+				active: this.settings.gutterAnnotationsEnabled,
+			},
+			{
+				highlight: this.settings.gutterCommentsToolbar,
+				active: this.settings.gutterCommentsEnabled,
+			},
+		]);
+		const onWorkspaceChange = (): void => {
+			this.scheduleReadingGutterSync();
+			window.setTimeout(() => this.toolbarHighlighter.refresh(), TOOLBAR_HIGHLIGHT_DELAY_MS);
+		};
+		this.registerEvent(this.app.workspace.on('layout-change', onWorkspaceChange));
+		this.registerEvent(this.app.workspace.on('active-leaf-change', onWorkspaceChange));
+		this.registerEvent(this.app.workspace.on('css-change', onWorkspaceChange));
+		this.app.workspace.onLayoutReady(onWorkspaceChange);
 	}
 
 	onunload(): void {
@@ -209,6 +277,17 @@ export default class MdAnnotationPlugin extends Plugin {
 			window.clearTimeout(this.syncTimer);
 			this.syncTimer = null;
 		}
+		if (this.readingGutterTimer !== null) {
+			window.clearTimeout(this.readingGutterTimer);
+			this.readingGutterTimer = null;
+		}
+		// Gutter layers live in the editor's own DOM, so they outlive the plugin
+		// unless torn down here (detachEditor covers the normal editor-close path).
+		for (const gutter of this.gutters.values()) gutter.destroy();
+		this.gutters.clear();
+		for (const gutter of this.readingGutters.values()) gutter.destroy();
+		this.readingGutters.clear();
+		this.toolbarHighlighter?.clear();
 		// Persist anything still debouncing, then stop the queue.
 		void this.queue.flush().finally(() => this.queue.dispose());
 		// Remove any highlight spans/markers still in rendered previews (render
@@ -226,6 +305,7 @@ export default class MdAnnotationPlugin extends Plugin {
 		this.syncFormatCommands();
 		for (const view of this.editors) this.decorate(view);
 		this.rerenderPreviews();
+		this.toolbarHighlighter?.refresh();
 		this.notifyChange();
 	}
 
@@ -373,15 +453,24 @@ export default class MdAnnotationPlugin extends Plugin {
 
 	attachEditor(view: EditorView): void {
 		this.editors.add(view);
+		this.gutters.set(view, new EditorGutter(view, this));
 	}
 
 	detachEditor(view: EditorView): void {
 		this.editors.delete(view);
+		this.gutters.get(view)?.destroy();
+		this.gutters.delete(view);
 		const timer = this.editorTimers.get(view);
 		if (timer !== undefined) {
 			window.clearTimeout(timer);
 			this.editorTimers.delete(view);
 		}
+	}
+
+	// The editor reflowed or scrolled — re-place the gutter cards without
+	// re-resolving anything.
+	onEditorGeometryChange(view: EditorView): void {
+		this.gutters.get(view)?.requestLayout();
 	}
 
 	scheduleEditorResolve(view: EditorView, delayMs: number): void {
@@ -418,6 +507,7 @@ export default class MdAnnotationPlugin extends Plugin {
 		applyEditorDecorations(view, state.annotations, state.outcomes, this.settings, (id) => {
 			this.revealAnnotation(path, id);
 		});
+		this.gutters.get(view)?.sync(path, state.annotations, state.outcomes, this.settings);
 	}
 
 	private decorateAllFor(path: string): void {
@@ -432,6 +522,54 @@ export default class MdAnnotationPlugin extends Plugin {
 			if (view instanceof MarkdownView && view.getMode() === 'preview') {
 				view.previewMode.rerender(true);
 			}
+		}
+	}
+
+	// ── Reading-view gutters ─────────────────────────────────────────────────
+
+	// A section of a note finished rendering — its highlight spans and markers
+	// (the things the Reading gutter measures) have just moved.
+	onReadingRendered(_path: string): void {
+		this.scheduleReadingGutterSync();
+	}
+
+	private scheduleReadingGutterSync(): void {
+		if (this.readingGutterTimer !== null) window.clearTimeout(this.readingGutterTimer);
+		this.readingGutterTimer = window.setTimeout(() => {
+			this.readingGutterTimer = null;
+			this.syncReadingGutters();
+		}, READING_GUTTER_DEBOUNCE_MS);
+	}
+
+	// Create a gutter for every markdown leaf now in Reading view, refresh the
+	// ones that already exist, and tear down any whose leaf has closed or
+	// switched back to editing.
+	private syncReadingGutters(): void {
+		const live = new Set<HTMLElement>();
+		for (const leaf of this.app.workspace.getLeavesOfType('markdown')) {
+			const view = leaf.view;
+			if (!(view instanceof MarkdownView) || view.getMode() !== 'preview') continue;
+			const path = view.file?.path;
+			if (path === undefined) continue;
+			const state = this.states.get(path);
+			if (!state) {
+				// Not parsed yet; ensureFileState notifies when it is.
+				void this.ensureFileState(path);
+				continue;
+			}
+			const key = view.contentEl;
+			live.add(key);
+			let gutter = this.readingGutters.get(key);
+			if (!gutter) {
+				gutter = new ReadingGutter(key, this);
+				this.readingGutters.set(key, gutter);
+			}
+			gutter.sync(path, state.annotations, state.outcomes, this.settings);
+		}
+		for (const [key, gutter] of this.readingGutters) {
+			if (live.has(key)) continue;
+			gutter.destroy();
+			this.readingGutters.delete(key);
 		}
 	}
 
@@ -683,6 +821,15 @@ export default class MdAnnotationPlugin extends Plugin {
 		void this.revealInSidebar(path, id, { flash: true, focus: true, activate: true });
 	}
 
+	// A gutter card was clicked: scroll the sidebar to the same entry, but only
+	// when it is already open. Opening it would move panes around underneath
+	// the click, and focusing its comment box would steal the caret from the
+	// card the user just clicked into — so this reveals without doing either.
+	revealFromGutter(path: string, id: string): void {
+		if (!this.hasSidebar()) return;
+		void this.revealInSidebar(path, id, { flash: true, focus: false, activate: false });
+	}
+
 	// Cursor moved in an editor — when sync is on and the sidebar is open, scroll
 	// it to the nearest entry.
 	onEditorSelectionChange(view: EditorView): void {
@@ -781,5 +928,8 @@ export default class MdAnnotationPlugin extends Plugin {
 
 	private notifyChange(): void {
 		for (const listener of this.changeListeners) listener();
+		// Reading view has no equivalent of the editor's decoration pass, so its
+		// gutters are refreshed from the same signal the sidebar listens to.
+		this.scheduleReadingGutterSync();
 	}
 }

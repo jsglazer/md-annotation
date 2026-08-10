@@ -71,6 +71,183 @@ body.theme-dark .mdann-marker-plain {
 	background-color: transparent;
 }
 
+/* Invisible position marker inserted in the Reading view when an annotation is
+   not being drawn but its gutter card still needs something to align to. The
+   width is zero, so it never affects the rendered text; the height gives the
+   gutter a line-height's worth of box to measure. */
+.mdann-anchor {
+	display: inline-block;
+	width: 0;
+	height: 1em;
+	vertical-align: baseline;
+}
+
+/* ── Margin gutter (Live Preview / Source / Reading) ─────────────────── */
+
+/* The room the cards sit in is reserved as an inline !important padding on
+   .cm-content, written by gutterLayer.ts — NOT here. Obsidian puts
+   --file-margins on that same element and themes re-declare it, so a rule in
+   this file loses the cascade and the cards end up on top of the text. The
+   mdann-gutter-on-left / -on-right classes remain on .cm-editor for CSS
+   snippets to hook, and mdann-gutter-suppressed marks a pane too narrow to
+   give up the space. */
+
+/* One layer per margin, inside .cm-scroller (which CodeMirror positions
+   relative), so the cards scroll with the text without any scroll handler.
+   Left/width are written by the measure pass. */
+.mdann-gutter {
+	position: absolute;
+	top: 0;
+	height: 0;
+	z-index: 1;
+	pointer-events: none;
+}
+
+.cm-editor.mdann-gutter-suppressed .mdann-gutter,
+.markdown-preview-view.mdann-gutter-suppressed .mdann-gutter {
+	display: none;
+}
+
+/* Reading view: the layers are absolutely positioned children of the preview
+   scroller, which needs to be the containing block for that to hold. The
+   scroller is where Obsidian puts the scrollbar, so positioning it changes
+   nothing else. */
+.markdown-preview-view.mdann-reading-gutter {
+	position: relative;
+}
+
+/* Applied to a card that has no position yet, or whose anchored line is not
+   currently rendered. It must be `visibility`, not `display: none` — the
+   measure pass reads offsetHeight/scrollHeight off these elements to auto-size
+   the note box, and a display:none element measures as zero. */
+.mdann-gutter-hidden {
+	visibility: hidden;
+}
+
+/* Colors are the annotation's own format: text color for the text AND the
+   border, background color for the fill. A format that leaves either unset
+   falls back to the theme. */
+.mdann-gutter-card {
+	position: absolute;
+	left: 12px;
+	right: 0;
+	box-sizing: border-box;
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	padding: 4px 7px;
+	border: 1px solid var(--mdann-g-light-fg, var(--background-modifier-border));
+	border-radius: var(--radius-s);
+	background-color: var(--mdann-g-light-bg, var(--background-primary));
+	color: var(--mdann-g-light-fg, var(--text-normal));
+	font-size: var(--font-ui-smaller);
+	line-height: 1.35;
+	pointer-events: auto;
+}
+
+/* In the left margin the text is on the other side, so the elbow gap swaps. */
+.mdann-gutter-card-left {
+	left: 0;
+	right: 12px;
+}
+
+body.theme-dark .mdann-gutter-card {
+	border-color: var(--mdann-g-dark-fg, var(--background-modifier-border));
+	background-color: var(--mdann-g-dark-bg, var(--background-primary));
+	color: var(--mdann-g-dark-fg, var(--text-normal));
+}
+
+.mdann-gutter-card-active {
+	box-shadow: 0 0 0 1px var(--interactive-accent);
+}
+
+.mdann-gutter-card-closed {
+	opacity: 0.5;
+}
+
+/* Comment number, matching the number on the marker in the text */
+.mdann-gutter-num {
+	align-self: flex-end;
+	font-size: 0.75em;
+	font-weight: var(--font-bold);
+	line-height: 1;
+	opacity: 0.65;
+}
+
+.mdann-gutter-num:empty {
+	display: none;
+}
+
+/* The note itself — a textarea dressed as plain text, auto-grown by the
+   measure pass, so a card is always editable in place */
+.mdann-gutter-text {
+	display: block;
+	width: 100%;
+	margin: 0;
+	padding: 0;
+	border: none;
+	background: transparent;
+	color: inherit;
+	font: inherit;
+	line-height: inherit;
+	resize: none;
+	overflow: hidden;
+}
+
+.mdann-gutter-text:focus {
+	outline: none;
+	box-shadow: none;
+}
+
+/* An un-noted highlight shows its quote here, so the card says what it is
+   about before anything has been written */
+.mdann-gutter-text::placeholder {
+	color: currentColor;
+	opacity: 0.5;
+	font-style: italic;
+}
+
+/* Leader line: a vertical run from the card back to the anchored line,
+   finished with a short horizontal tick pointing into the text */
+.mdann-gutter-leader {
+	position: absolute;
+	left: 0;
+	width: 0;
+	color: var(--mdann-g-light-fg, var(--text-faint));
+	border-left: 1px solid currentColor;
+	opacity: 0.6;
+	pointer-events: none;
+}
+
+.mdann-gutter-leader-left {
+	left: auto;
+	right: 0;
+}
+
+body.theme-dark .mdann-gutter-leader {
+	color: var(--mdann-g-dark-fg, var(--text-faint));
+}
+
+.mdann-gutter-tick {
+	position: absolute;
+	top: 0;
+	left: -6px;
+	width: 6px;
+	border-top: 1px solid currentColor;
+}
+
+.mdann-gutter-leader-left .mdann-gutter-tick {
+	left: auto;
+	right: -6px;
+}
+
+/* The card was pushed below its line, so the elbow meets the text at the
+   bottom of the run instead of the top */
+.mdann-gutter-tick-bottom {
+	top: auto;
+	bottom: 0;
+}
+
 /* ── Sidebar ─────────────────────────────────────────────────────────── */
 
 .mdann-sidebar {
@@ -176,12 +353,20 @@ body.theme-dark .mdann-marker-plain {
 
 /* ── Sidebar toolbar (search / filter / First / Last) ─────────────────── */
 
+/* Pinned to the top of the panel so search and filter stay reachable however
+   far down the list you have scrolled. The negative margins + matching padding
+   let the opaque background span the panel's own padding, so entries scroll
+   under the bar rather than beside it. */
 .mdann-toolbar {
+	position: sticky;
+	top: 0;
+	z-index: 2;
 	display: flex;
 	flex-direction: column;
 	gap: var(--size-4-1);
-	padding-bottom: var(--size-4-2);
-	margin-bottom: var(--size-4-1);
+	margin: 0 calc(-1 * var(--size-4-2)) var(--size-4-1);
+	padding: var(--size-4-1) var(--size-4-2) var(--size-4-2);
+	background: var(--background-secondary);
 	border-bottom: 1px solid var(--background-modifier-border);
 }
 

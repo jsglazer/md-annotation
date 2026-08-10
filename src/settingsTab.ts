@@ -9,8 +9,17 @@
 import type { App } from 'obsidian';
 import { Modal, Notice, PluginSettingTab, Setting } from 'obsidian';
 
-import type { ColorOption, PartStyle, ThemedPartStyles } from './core/settings';
+import type {
+	ColorOption,
+	GutterSide,
+	PartStyle,
+	ThemedPartStyles,
+	ToolbarHighlight,
+} from './core/settings';
 import {
+	GUTTER_MAX_WIDTH,
+	GUTTER_MIN_WIDTH,
+	clampGutterWidth,
 	exportFormats,
 	isUnsafeKey,
 	isValidFontSize,
@@ -20,6 +29,17 @@ import {
 	parseFormatsImport,
 } from './core/settings';
 import type MdAnnotationPlugin from './main';
+import {
+	isNoteToolbarAvailable,
+	itemDisplayName,
+	listHighlightableItems,
+	listToolbars,
+} from './ui/toolbarHighlight';
+
+type TabId = 'general' | 'annotations' | 'comments' | 'gutter';
+
+// A slider reports every step of a drag; persist once the drag settles.
+const SLIDER_SAVE_DEBOUNCE_MS = 250;
 
 function isValidHex(v: string): boolean {
 	return /^#[0-9a-fA-F]{6}$/.test(v);
@@ -31,7 +51,8 @@ function enabledColor(opt: ColorOption): string {
 
 export class MdAnnotationSettingTab extends PluginSettingTab {
 	private pendingFormatName = '';
-	private activeTab: 'general' | 'annotations' | 'comments' = 'general';
+	private activeTab: TabId = 'general';
+	private saveTimer: number | null = null;
 
 	constructor(
 		app: App,
@@ -55,10 +76,11 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 		});
 
 		const tabBar = containerEl.createDiv('mdann-tab-bar');
-		const tabs: Array<{ id: 'general' | 'annotations' | 'comments'; label: string }> = [
+		const tabs: Array<{ id: TabId; label: string }> = [
 			{ id: 'general', label: 'General' },
 			{ id: 'annotations', label: 'Annotations' },
 			{ id: 'comments', label: 'Comments' },
+			{ id: 'gutter', label: 'Gutter' },
 		];
 		for (const tab of tabs) {
 			const btn = tabBar.createEl('button', {
@@ -77,6 +99,10 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 		}
 		if (this.activeTab === 'comments') {
 			this.renderCommentsTab(containerEl);
+			return;
+		}
+		if (this.activeTab === 'gutter') {
+			this.renderGutterTab(containerEl);
 			return;
 		}
 		this.renderGeneralTab(containerEl);
@@ -117,6 +143,236 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 
 		this.renderNavigationSection(containerEl);
 		this.renderFormatTransferSection(containerEl);
+	}
+
+	// ── Gutter tab ───────────────────────────────────────────────────────────
+
+	// Everything about the margin gutter in one place: what it shows, which
+	// margin each type uses, how wide it is, and the optional Note Toolbar
+	// items that light up while it is on.
+	private renderGutterTab(containerEl: HTMLElement): void {
+		containerEl.createEl('p', {
+			text:
+				'Notes can be shown as cards in the margin, level with the line they are ' +
+				'anchored to, and edited in place — in Live Preview, Source mode and Reading ' +
+				'view. A gutter is dropped automatically while a pane is too narrow to give ' +
+				'up the space.',
+			cls: 'setting-item-description',
+		});
+
+		new Setting(containerEl).setName('Annotation gutter').setHeading();
+		this.renderToggle(
+			containerEl,
+			'Show annotations in the gutter',
+			'Show each annotation\'s note as a card in the margin beside its line (also toggled by the "Show/hide annotations in the gutter" command)',
+			() => this.plugin.settings.gutterAnnotationsEnabled,
+			(v) => {
+				this.plugin.settings.gutterAnnotationsEnabled = v;
+			},
+		);
+		this.renderGutterSide(
+			containerEl,
+			'Annotation gutter side',
+			'Which margin annotation cards sit in',
+			() => this.plugin.settings.gutterAnnotationsSide,
+			(v) => {
+				this.plugin.settings.gutterAnnotationsSide = v;
+			},
+		);
+
+		new Setting(containerEl).setName('Comment gutter').setHeading();
+		this.renderToggle(
+			containerEl,
+			'Show comments in the gutter',
+			'Show each comment as a card in the margin beside its marker (also toggled by the "Show/hide comments in the gutter" command)',
+			() => this.plugin.settings.gutterCommentsEnabled,
+			(v) => {
+				this.plugin.settings.gutterCommentsEnabled = v;
+			},
+		);
+		this.renderGutterSide(
+			containerEl,
+			'Comment gutter side',
+			'Which margin comment cards sit in',
+			() => this.plugin.settings.gutterCommentsSide,
+			(v) => {
+				this.plugin.settings.gutterCommentsSide = v;
+			},
+		);
+
+		new Setting(containerEl).setName('Size').setHeading();
+		new Setting(containerEl)
+			.setName('Gutter width')
+			.setDesc('Room each gutter takes from the note, in pixels')
+			.addSlider((slider) =>
+				slider
+					.setLimits(GUTTER_MIN_WIDTH, GUTTER_MAX_WIDTH, 10)
+					.setValue(clampGutterWidth(this.plugin.settings.gutterWidth))
+					.setDynamicTooltip()
+					.onChange((value) => {
+						// Sliders fire continuously; saving on every step would
+						// redecorate every editor mid-drag.
+						this.plugin.settings.gutterWidth = clampGutterWidth(value);
+						this.saveDebounced();
+					}),
+			);
+
+		this.renderToolbarHighlightSection(containerEl);
+	}
+
+	// Note Toolbar has no API for third-party styling, so the section simply
+	// disappears when it is not installed — there is nothing to point at.
+	private renderToolbarHighlightSection(containerEl: HTMLElement): void {
+		// eslint-disable-next-line obsidianmd/ui/sentence-case -- 'Note Toolbar' is the plugin's own name
+		new Setting(containerEl).setName('Note Toolbar buttons').setHeading();
+
+		if (!isNoteToolbarAvailable(this.app)) {
+			containerEl.createEl('p', {
+				text:
+					'Install and enable the Note Toolbar plugin to have one of its buttons change ' +
+					'colour while a gutter is showing.',
+				cls: 'setting-item-description',
+			});
+			return;
+		}
+
+		containerEl.createEl('p', {
+			text:
+				'Pick the toolbar button that runs each "Show/hide … in the gutter" command and ' +
+				'it will take the colours below while that gutter is on, so the toolbar reads ' +
+				'as pressed. A gutter that is off leaves its button to Note Toolbar.',
+			cls: 'setting-item-description',
+		});
+
+		this.renderToolbarItemPicker(
+			containerEl,
+			'Annotations button',
+			this.plugin.settings.gutterAnnotationsToolbar,
+		);
+		this.renderToolbarItemPicker(
+			containerEl,
+			'Comments button',
+			this.plugin.settings.gutterCommentsToolbar,
+		);
+
+		this.renderToolbarHighlightGrid(containerEl);
+	}
+
+	// Toolbar + item dropdowns for one of the two buttons. Changing the toolbar
+	// clears the item, since item uuids belong to a single toolbar.
+	private renderToolbarItemPicker(
+		containerEl: HTMLElement,
+		name: string,
+		highlight: ToolbarHighlight,
+	): void {
+		new Setting(containerEl)
+			.setName(name)
+			.setDesc('Toolbar, then the button within it')
+			.addDropdown((dropdown) => {
+				dropdown.addOption('', 'None');
+				for (const toolbar of listToolbars(this.app)) {
+					dropdown.addOption(toolbar.uuid, toolbar.name);
+				}
+				dropdown.setValue(highlight.toolbarUuid).onChange(async (value) => {
+					highlight.toolbarUuid = value;
+					highlight.itemUuid = '';
+					await this.saveAndRefresh();
+					this.display();
+				});
+			})
+			.addDropdown((dropdown) => {
+				const items = highlight.toolbarUuid
+					? listHighlightableItems(this.app, highlight.toolbarUuid)
+					: [];
+				dropdown.addOption('', items.length === 0 ? 'No buttons' : 'None');
+				for (const item of items) dropdown.addOption(item.uuid, itemDisplayName(item));
+				dropdown.setDisabled(items.length === 0);
+				dropdown.setValue(highlight.itemUuid).onChange(async (value) => {
+					highlight.itemUuid = value;
+					await this.saveAndRefresh();
+				});
+			});
+	}
+
+	// The two colour rows, laid out like the format grid so Fr/Bg per theme
+	// read the same way here as everywhere else in these settings.
+	private renderToolbarHighlightGrid(containerEl: HTMLElement): void {
+		const wrap = containerEl.createDiv('mdann-grid-wrap');
+		const table = wrap.createEl('table', { cls: 'mdann-grid-table' });
+		const thead = table.createEl('thead');
+
+		const r1 = thead.createEl('tr');
+		r1.createEl('th', { text: 'Button', attr: { rowspan: '2' }, cls: 'mdann-grid-name-h' });
+		r1.createEl('th', { text: 'Light', attr: { colspan: '2' }, cls: 'mdann-grid-sep' });
+		r1.createEl('th', { text: 'Dark', attr: { colspan: '2' }, cls: 'mdann-grid-sep' });
+		r1.createEl('th', { text: 'Example', attr: { rowspan: '2' }, cls: 'mdann-grid-sep' });
+
+		const r2 = thead.createEl('tr');
+		for (let i = 0; i < 4; i++) {
+			r2.createEl('th', { text: i % 2 === 0 ? 'Fr' : 'Bg', cls: i % 2 === 0 ? 'mdann-grid-sep' : '' });
+		}
+
+		const tbody = table.createEl('tbody');
+		this.renderToolbarHighlightRow(tbody, 'Annotations', this.plugin.settings.gutterAnnotationsToolbar);
+		this.renderToolbarHighlightRow(tbody, 'Comments', this.plugin.settings.gutterCommentsToolbar);
+	}
+
+	private renderToolbarHighlightRow(
+		tbody: HTMLElement,
+		label: string,
+		highlight: ToolbarHighlight,
+	): void {
+		const tr = tbody.createEl('tr');
+		tr.createEl('td', { text: label, cls: 'mdann-grid-name' });
+
+		let exampleTd: HTMLElement | null = null;
+		const refreshExample = (): void => {
+			if (!exampleTd) return;
+			exampleTd.empty();
+			const part: PartStyle = highlight.style[this.isDarkTheme() ? 'dark' : 'light'];
+			this.appendExampleSpan(exampleTd, label, enabledColor(part.fr), enabledColor(part.bg), '');
+		};
+
+		for (const theme of ['light', 'dark'] as const) {
+			for (const field of ['fr', 'bg'] as const) {
+				const td = tr.createEl('td', { cls: field === 'fr' ? 'mdann-grid-sep' : '' });
+				this.renderColorCell(td, highlight.style[theme][field], refreshExample);
+			}
+		}
+
+		exampleTd = tr.createEl('td', { cls: 'mdann-grid-example mdann-grid-sep' });
+		refreshExample();
+	}
+
+	private saveDebounced(): void {
+		if (this.saveTimer !== null) window.clearTimeout(this.saveTimer);
+		this.saveTimer = window.setTimeout(() => {
+			this.saveTimer = null;
+			void this.saveAndRefresh();
+		}, SLIDER_SAVE_DEBOUNCE_MS);
+	}
+
+	// Left/right chooser for one annotation type's gutter cards.
+	private renderGutterSide(
+		containerEl: HTMLElement,
+		name: string,
+		desc: string,
+		getValue: () => GutterSide,
+		setValue: (v: GutterSide) => void,
+	): void {
+		new Setting(containerEl)
+			.setName(name)
+			.setDesc(desc)
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption('left', 'Left')
+					.addOption('right', 'Right')
+					.setValue(getValue())
+					.onChange(async (value) => {
+						setValue(value === 'left' ? 'left' : 'right');
+						await this.saveAndRefresh();
+					}),
+			);
 	}
 
 	// The three text ⇄ sidebar navigation behaviours, each independently
@@ -232,6 +488,12 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 				this.plugin.settings.annotationFormattingEnabled = v;
 			},
 		);
+
+		containerEl.createEl('p', {
+			// eslint-disable-next-line obsidianmd/ui/sentence-case -- 'Gutter' names a tab in this settings pane
+			text: 'Margin cards for annotations live on the Gutter tab.',
+			cls: 'setting-item-description',
+		});
 
 		// eslint-disable-next-line obsidianmd/ui/sentence-case -- heading text specified by design
 		new Setting(containerEl).setName('Annotation Formats').setHeading();
@@ -534,6 +796,12 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 				this.plugin.settings.commentsFormattingEnabled = v;
 			},
 		);
+
+		containerEl.createEl('p', {
+			// eslint-disable-next-line obsidianmd/ui/sentence-case -- 'Gutter' names a tab in this settings pane
+			text: 'Margin cards for comments live on the Gutter tab.',
+			cls: 'setting-item-description',
+		});
 
 		new Setting(containerEl).setName('Comment format').setHeading();
 		containerEl.createEl('p', {
