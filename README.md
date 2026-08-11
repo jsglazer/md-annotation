@@ -20,6 +20,7 @@ MD Annotation is the delimiter-free successor to [Annotation Manager](https://gi
 
   Line-delimited JSON means a sync or Git merge conflict corrupts at most one line — every other annotation still loads, and the damaged line is preserved verbatim and flagged in the sidebar instead of being deleted.
 - **Rendering** — highlights are applied transiently: CodeMirror decorations in Live Preview / Source mode, wrapped spans in Reading View. Nothing is ever written into the body text.
+- **Margin cards** — the optional gutter draws each note as a card in the margin, level with the line it belongs to. In the editor the positions come from CodeMirror's own geometry; in Reading View they are measured from the rendered spans. Both share the same card, so a note reads and edits identically wherever you are.
 - **Self-healing** — when an edit shifts a highlight and it re-resolves with high confidence, the refreshed selector is saved back automatically. Low-confidence or ambiguous matches are flagged as *orphaned* — the plugin never guesses.
 
 ## Annotations vs. comments
@@ -34,14 +35,15 @@ The two are distinguished by whether text is selected when you run the single **
 - **Highlights** with unlimited custom formats — per-format Use toggle, font/background colors (each with its own enable checkbox) per light/dark theme, and an optional font size
 - **Point comments** — a **numbered** marker icon at any spot in the text, no selection needed; styled by the dedicated comment format or any annotation format
 - **Sidebar** listing every annotation of the active note: **click an entry to jump to it in the text**, edit comments, **reassign an annotation (or comment) to a different format** via a dropdown, open/close status, delete (with confirmation). Comment entries show their **line number in the top right** of the card.
-- **Sidebar toolbar** — **search** across every note/comment box, a **format filter** built from the identifiers actually present in the open note (so you can show only your `Key` or `Define` entries), and **First / Last** buttons that scroll the list to either end
+- **Sidebar toolbar** — **search** across every note/comment box, a **format filter** built from the identifiers actually present in the open note (so you can show only your `Key` or `Define` entries), and **First / Last** buttons that scroll the list to either end. The toolbar is **pinned to the top** of the panel, so it stays reachable however far down the list you scroll.
+- **Margin gutter** — show notes as **editable cards in the margin**, level with the line they're anchored to and joined to it by a leader line. Annotations and comments switch on separately and can occupy **opposite margins**; the width is yours to set. Works in **Live Preview, Source mode _and_ Reading View**. Click a card to scroll the sidebar to the same entry. A gutter drops itself automatically while a pane is too narrow to spare the room.
 - **Two-way navigation** — click annotated text or a comment marker to jump to its sidebar entry (and focus its comment box); on open the sidebar scrolls to the entry nearest the cursor. Clicking into an entry's note box flashes that annotation in the text so you can see what you're writing about.
 - **Text ⇄ sidebar sync** — the sidebar tracks the entry nearest the cursor as you move through the note. On by default; switchable from settings or the **Sync text and sidebar** command (the two are one state).
 - **Share formats between vaults** — export every format to the clipboard as JSON and import it in another vault, merging into what's already there or replacing the set outright. Obsidian Sync replicates a vault to your *other devices*, never to your *other vaults*, so this is the way formats travel.
 - **Show/hide formatting** on demand — commands and settings toggles to hide annotation colors, comment colors, or comment markers entirely
 - **Format renames propagate** — rename a format in settings and every note referencing the old name is rewritten automatically
 - **A command per format** — each format automatically gets its own **Apply - _name_** command (usable from the Command Palette, a hotkey, or a toolbar); adding, renaming, or deleting a format creates or removes its command instantly
-- **Note Toolbar integration** — a paste-in script builds a live "apply format" menu from those commands, so you can highlight the selection (or drop a comment at the cursor) from a [Note Toolbar](https://github.com/chrisgurney/obsidian-note-toolbar) button (see below)
+- **Note Toolbar integration** — a paste-in script builds a live "apply format" menu from those commands, so you can highlight the selection (or drop a comment at the cursor) from a [Note Toolbar](https://github.com/chrisgurney/obsidian-note-toolbar) button (see below). A toolbar button bound to a gutter toggle can also **change color while that gutter is on**, so the toolbar shows its state at a glance.
 - **Queryable from Dataview / Datacore** — a public JS API for `dataviewjs` / `datacorejs` / `datacorejsx` blocks (see below)
 - **Orphan repair** — orphaned annotations are flagged; select the new text and re-anchor with one click
 - **Metadata** on every annotation: author (from settings), status, created / modified / closed timestamps
@@ -55,6 +57,8 @@ The two are distinguished by whether text is selected when you run the single **
 | **Apply - _name_** (one per format) | Apply that specific format directly: selection → highlight it; no selection → drop a comment marker in that format's color. Registered and removed automatically as formats change. |
 | **Show/hide annotation formats** | Toggle highlight colors on annotated text |
 | **Show/hide comment formats** | Toggle colors on comment markers |
+| **Show/hide annotations in the gutter** | Toggle the margin cards for annotations. Flips the same persisted setting shown on the Gutter tab. |
+| **Show/hide comments in the gutter** | Toggle the margin cards for comments. Flips the same persisted setting shown on the Gutter tab. |
 | **Sync text and sidebar** | Toggle continuous syncing of the sidebar to the entry nearest the cursor. Flips the same persisted setting shown on the General tab. |
 | **Open annotation sidebar** | Open the annotations panel |
 
@@ -62,11 +66,28 @@ The Annotate action is also in the editor context menu — shown as *Annotate se
 
 ## Settings
 
-Settings are organized into **General / Annotations / Comments** tabs:
+Settings are organized into **General / Annotations / Comments / Gutter** tabs:
 
 - **General** — the author name recorded on every annotation you create; three **navigation** toggles (all on by default); and **format export / import**
 - **Annotations** — a formatting visibility toggle, plus a per-format grid: Use checkbox, editable name, Fr/Bg colors for light and dark themes (each color has its own enable checkbox), font size, and a live sample-text example. Renaming a format here also updates every annotated note.
 - **Comments** — hide-markers and formatting toggles, plus the dedicated comment format's Fr/Bg colors per theme with a live example
+- **Gutter** — everything about the margin cards: show-toggles and left/right margin choice for annotations and for comments independently, the shared width, and the optional Note Toolbar button highlight (see below)
+
+### The margin gutter
+
+Notes can be shown as cards in the page margin instead of (or as well as) in the sidebar — each level with the line it's anchored to, joined by a leader line, and editable in place. Cards that would overlap are pushed down, with the leader stretching back up to the right line.
+
+| Setting | Effect |
+| --- | --- |
+| **Show annotations / comments in the gutter** | Switch each type on separately (also toggled by its command) |
+| **Annotation / comment gutter side** | Which margin each type uses — they can sit in opposite margins |
+| **Gutter width** | Room each gutter takes from the note, 140–480 px |
+
+It works in Live Preview, Source mode and Reading View. Clicking a card scrolls the sidebar to the matching entry when the sidebar is already open. Orphaned annotations have no line to sit beside, so they stay in the sidebar where they can be re-anchored.
+
+### Note Toolbar button highlight
+
+If [Note Toolbar](https://github.com/chrisgurney/obsidian-note-toolbar) is installed, the **Gutter** tab can bind each *Show/hide … in the gutter* command to one of its buttons: pick the toolbar and the button, set Fr/Bg colors per light and dark theme, and that button takes those colors for as long as the gutter is showing. A gutter that's off leaves its button entirely to Note Toolbar, so "on" reads as the exception.
 
 ### Navigation toggles
 
