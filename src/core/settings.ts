@@ -71,6 +71,9 @@ export interface MdAnnotationSettings {
 	gutterAnnotationsSide: GutterSide;
 	gutterCommentsSide: GutterSide;
 	gutterWidth: number;
+	// Reserve the margin only on notes that actually have something to put in
+	// it, rather than on every note the moment the gutter is switched on.
+	gutterOnlyWhenAnnotated: boolean;
 
 	// Note Toolbar items that follow the two gutter toggles, so a toolbar shows
 	// at a glance which gutters are on. Inert until an item is chosen.
@@ -127,6 +130,7 @@ export function defaultSettings(): MdAnnotationSettings {
 		gutterAnnotationsSide: 'right',
 		gutterCommentsSide: 'right',
 		gutterWidth: GUTTER_DEFAULT_WIDTH,
+		gutterOnlyWhenAnnotated: true,
 		gutterAnnotationsToolbar: makeToolbarHighlight(
 			partStyle('', '#fff3a3'),
 			partStyle('', '#7a6f1f'),
@@ -232,6 +236,7 @@ export function normalizeSettings(raw: unknown): MdAnnotationSettings {
 		'commentsHiddenEnabled',
 		'gutterAnnotationsEnabled',
 		'gutterCommentsEnabled',
+		'gutterOnlyWhenAnnotated',
 		'syncTextAndSidebar',
 		'sidebarClickJumpsToText',
 		'textClickJumpsToSidebar',

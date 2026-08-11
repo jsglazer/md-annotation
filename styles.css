@@ -116,6 +116,25 @@ body.theme-dark .mdann-marker-plain {
 	position: relative;
 }
 
+/* With "only on annotated notes" on, a margin opens the first time a note has
+   something to put in it and closes when the last one goes — so the padding
+   is worth easing rather than snapping. Hung on the persistent host classes,
+   not on mdann-gutter-on-*: those are removed at the same moment the padding
+   is, which would leave the collapse un-animated. */
+.cm-editor.mdann-gutter-host .cm-content,
+.markdown-preview-view.mdann-reading-gutter .markdown-preview-sizer {
+	transition:
+		padding-left 140ms ease-out,
+		padding-right 140ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.cm-editor.mdann-gutter-host .cm-content,
+	.markdown-preview-view.mdann-reading-gutter .markdown-preview-sizer {
+		transition: none;
+	}
+}
+
 /* Applied to a card that has no position yet, or whose anchored line is not
    currently rendered. It must be `visibility`, not `display: none` — the
    measure pass reads offsetHeight/scrollHeight off these elements to auto-size

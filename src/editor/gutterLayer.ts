@@ -17,11 +17,13 @@ import { numberComments } from '../core/ordering';
 import type { GutterSide, MdAnnotationSettings } from '../core/settings';
 import { GUTTER_DEFAULT_WIDTH, clampGutterWidth } from '../core/settings';
 import type { Annotation } from '../core/types';
-import type { GutterHost, Placement } from './gutterCards';
+import type { GutterContent, GutterHost, GutterTypes, Placement } from './gutterCards';
 import {
 	CardLayers,
 	MIN_TEXT_WIDTH,
 	activeGutterSides,
+	gutterContent,
+	gutterOpenTypes,
 	gutterShows,
 	gutterSideFor,
 } from './gutterCards';
@@ -50,6 +52,9 @@ export class EditorGutter {
 	private path = '';
 	private width = GUTTER_DEFAULT_WIDTH;
 	private activeSides: Record<GutterSide, boolean> = { left: false, right: false };
+	// Which types currently have an open margin. Kept across passes because
+	// closing one is hysteretic — see gutterOpenTypes.
+	private openTypes: GutterTypes = { annotations: false, comments: false };
 	private suppressed = false;
 	private measurePending = false;
 	private layoutDirty = false;
@@ -67,6 +72,10 @@ export class EditorGutter {
 			() => this.requestLayout(),
 		);
 		this.cards.mount(view.scrollDOM);
+		// Persistent marker for the padding transition in styles.css: it has to
+		// outlive the on-left/on-right classes, or the collapse back to no
+		// gutter would have no rule to animate it.
+		view.dom.classList.add('mdann-gutter-host');
 	}
 
 	destroy(): void {
@@ -75,6 +84,7 @@ export class EditorGutter {
 		this.applyPadding();
 		this.cards.destroy();
 		this.view.dom.classList.remove(
+			'mdann-gutter-host',
 			'mdann-gutter-on-left',
 			'mdann-gutter-on-right',
 			'mdann-gutter-suppressed',
@@ -90,7 +100,7 @@ export class EditorGutter {
 	): void {
 		if (this.destroyed) return;
 		this.path = path;
-		this.applyMargins(settings);
+		this.applyMargins(settings, gutterContent(annotations, outcomes));
 
 		const numbers = numberComments(annotations, outcomes);
 		const docLength = this.view.state.doc.length;
@@ -145,12 +155,13 @@ export class EditorGutter {
 		});
 	}
 
-	// Reserve the margin the cards occupy. Padding is applied per side whenever
-	// that side is switched on — not per card — so the text does not shift the
-	// moment the first annotation appears.
-	private applyMargins(settings: MdAnnotationSettings): void {
+	// Reserve the margin the cards occupy. Padding is applied per side, not per
+	// card, so adding a second annotation never shifts the text — only opening
+	// or closing a side does, and styles.css transitions that.
+	private applyMargins(settings: MdAnnotationSettings, content: GutterContent): void {
 		this.width = clampGutterWidth(settings.gutterWidth);
-		this.activeSides = activeGutterSides(settings);
+		this.openTypes = gutterOpenTypes(settings, content, this.openTypes);
+		this.activeSides = activeGutterSides(settings, this.openTypes);
 		const dom = this.view.dom;
 		dom.classList.toggle('mdann-gutter-on-left', this.activeSides.left);
 		dom.classList.toggle('mdann-gutter-on-right', this.activeSides.right);

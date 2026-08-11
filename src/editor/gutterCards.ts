@@ -7,6 +7,7 @@
 // Nothing here reads layout: callers hand in already-measured positions, so a
 // pass never interleaves layout reads with layout writes.
 
+import type { MatchResult } from '../core/matcher';
 import type { GutterSide, MdAnnotationSettings } from '../core/settings';
 import { GUTTER_STYLE_PROPS, gutterStyleVars } from '../core/settings';
 import type { Annotation } from '../core/types';
@@ -307,11 +308,69 @@ export function gutterSideFor(annotation: Annotation, settings: MdAnnotationSett
 		: settings.gutterAnnotationsSide;
 }
 
-// Which margins are in use for the current settings.
-export function activeGutterSides(settings: MdAnnotationSettings): Record<GutterSide, boolean> {
+// What one note has to put in the gutter, per type. `matched` is what would be
+// drawn right now; `present` also counts annotations that are currently
+// orphaned, which is what keeps the margin from collapsing mid-edit — see
+// gutterOpenTypes.
+export interface GutterContent {
+	matched: GutterTypes;
+	present: GutterTypes;
+}
+
+export interface GutterTypes {
+	annotations: boolean;
+	comments: boolean;
+}
+
+export function gutterContent(
+	annotations: ReadonlyArray<Annotation>,
+	outcomes: ReadonlyMap<string, MatchResult>,
+): GutterContent {
+	const matched: GutterTypes = { annotations: false, comments: false };
+	const present: GutterTypes = { annotations: false, comments: false };
+	for (const annotation of annotations) {
+		const key = annotation.type === 'comment' ? 'comments' : 'annotations';
+		present[key] = true;
+		if (outcomes.get(annotation.id)?.status === 'matched') matched[key] = true;
+	}
+	return { matched, present };
+}
+
+// Whether each type's gutter is open for this note. With
+// gutterOnlyWhenAnnotated off this is just the two enable toggles; with it on,
+// a margin opens once the note has a card of that type to show.
+//
+// Closing is deliberately stickier than opening. Editing the very text a
+// highlight is anchored to orphans it for a moment, and collapsing the margin
+// on that would reflow the note under the cursor mid-keystroke — so a gutter
+// that is already open stays open while any annotation of its type remains in
+// the note, and closes only once the last one is gone. A note holding nothing
+// but orphans still never opens one, since there would be no card in it.
+export function gutterOpenTypes(
+	settings: MdAnnotationSettings,
+	content: GutterContent,
+	previous: GutterTypes,
+): GutterTypes {
+	const open = (key: keyof GutterTypes, enabled: boolean): boolean => {
+		if (!enabled) return false;
+		if (!settings.gutterOnlyWhenAnnotated) return true;
+		if (content.matched[key]) return true;
+		return previous[key] && content.present[key];
+	};
+	return {
+		annotations: open('annotations', settings.gutterAnnotationsEnabled),
+		comments: open('comments', settings.gutterCommentsEnabled),
+	};
+}
+
+// Which margins are in use, given which types are open.
+export function activeGutterSides(
+	settings: MdAnnotationSettings,
+	open: GutterTypes,
+): Record<GutterSide, boolean> {
 	const active = (side: GutterSide): boolean =>
-		(settings.gutterAnnotationsEnabled && settings.gutterAnnotationsSide === side) ||
-		(settings.gutterCommentsEnabled && settings.gutterCommentsSide === side);
+		(open.annotations && settings.gutterAnnotationsSide === side) ||
+		(open.comments && settings.gutterCommentsSide === side);
 	return { left: active('left'), right: active('right') };
 }
 

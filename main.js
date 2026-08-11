@@ -619,6 +619,7 @@ function defaultSettings() {
     gutterAnnotationsSide: "right",
     gutterCommentsSide: "right",
     gutterWidth: GUTTER_DEFAULT_WIDTH,
+    gutterOnlyWhenAnnotated: true,
     gutterAnnotationsToolbar: makeToolbarHighlight(
       partStyle("", "#fff3a3"),
       partStyle("", "#7a6f1f")
@@ -699,6 +700,7 @@ function normalizeSettings(raw) {
     "commentsHiddenEnabled",
     "gutterAnnotationsEnabled",
     "gutterCommentsEnabled",
+    "gutterOnlyWhenAnnotated",
     "syncTextAndSidebar",
     "sidebarClickJumpsToText",
     "textClickJumpsToSidebar"
@@ -1095,8 +1097,31 @@ function gutterShows(annotation, settings) {
 function gutterSideFor(annotation, settings) {
   return annotation.type === "comment" ? settings.gutterCommentsSide : settings.gutterAnnotationsSide;
 }
-function activeGutterSides(settings) {
-  const active = (side) => settings.gutterAnnotationsEnabled && settings.gutterAnnotationsSide === side || settings.gutterCommentsEnabled && settings.gutterCommentsSide === side;
+function gutterContent(annotations, outcomes) {
+  var _a;
+  const matched = { annotations: false, comments: false };
+  const present = { annotations: false, comments: false };
+  for (const annotation of annotations) {
+    const key = annotation.type === "comment" ? "comments" : "annotations";
+    present[key] = true;
+    if (((_a = outcomes.get(annotation.id)) == null ? void 0 : _a.status) === "matched") matched[key] = true;
+  }
+  return { matched, present };
+}
+function gutterOpenTypes(settings, content, previous) {
+  const open = (key, enabled) => {
+    if (!enabled) return false;
+    if (!settings.gutterOnlyWhenAnnotated) return true;
+    if (content.matched[key]) return true;
+    return previous[key] && content.present[key];
+  };
+  return {
+    annotations: open("annotations", settings.gutterAnnotationsEnabled),
+    comments: open("comments", settings.gutterCommentsEnabled)
+  };
+}
+function activeGutterSides(settings, open) {
+  const active = (side) => open.annotations && settings.gutterAnnotationsSide === side || open.comments && settings.gutterCommentsSide === side;
   return { left: active("left"), right: active("right") };
 }
 function excerpt(text) {
@@ -1122,6 +1147,9 @@ var EditorGutter = class {
     this.path = "";
     this.width = GUTTER_DEFAULT_WIDTH;
     this.activeSides = { left: false, right: false };
+    // Which types currently have an open margin. Kept across passes because
+    // closing one is hysteretic — see gutterOpenTypes.
+    this.openTypes = { annotations: false, comments: false };
     this.suppressed = false;
     this.measurePending = false;
     this.layoutDirty = false;
@@ -1134,6 +1162,7 @@ var EditorGutter = class {
       () => this.requestLayout()
     );
     this.cards.mount(view.scrollDOM);
+    view.dom.classList.add("mdann-gutter-host");
   }
   destroy() {
     this.destroyed = true;
@@ -1141,6 +1170,7 @@ var EditorGutter = class {
     this.applyPadding();
     this.cards.destroy();
     this.view.dom.classList.remove(
+      "mdann-gutter-host",
       "mdann-gutter-on-left",
       "mdann-gutter-on-right",
       "mdann-gutter-suppressed"
@@ -1150,7 +1180,7 @@ var EditorGutter = class {
   sync(path, annotations, outcomes, settings) {
     if (this.destroyed) return;
     this.path = path;
-    this.applyMargins(settings);
+    this.applyMargins(settings, gutterContent(annotations, outcomes));
     const numbers = numberComments(annotations, outcomes);
     const docLength = this.view.state.doc.length;
     const wanted = /* @__PURE__ */ new Set();
@@ -1194,12 +1224,13 @@ var EditorGutter = class {
       }
     });
   }
-  // Reserve the margin the cards occupy. Padding is applied per side whenever
-  // that side is switched on — not per card — so the text does not shift the
-  // moment the first annotation appears.
-  applyMargins(settings) {
+  // Reserve the margin the cards occupy. Padding is applied per side, not per
+  // card, so adding a second annotation never shifts the text — only opening
+  // or closing a side does, and styles.css transitions that.
+  applyMargins(settings, content) {
     this.width = clampGutterWidth(settings.gutterWidth);
-    this.activeSides = activeGutterSides(settings);
+    this.openTypes = gutterOpenTypes(settings, content, this.openTypes);
+    this.activeSides = activeGutterSides(settings, this.openTypes);
     const dom = this.view.dom;
     dom.classList.toggle("mdann-gutter-on-left", this.activeSides.left);
     dom.classList.toggle("mdann-gutter-on-right", this.activeSides.right);
@@ -1443,6 +1474,8 @@ var ReadingGutter = class {
     this.path = "";
     this.width = GUTTER_DEFAULT_WIDTH;
     this.activeSides = { left: false, right: false };
+    // Which types currently have an open margin — see gutterOpenTypes.
+    this.openTypes = { annotations: false, comments: false };
     this.suppressed = false;
     this.frame = null;
     this.destroyed = false;
@@ -1483,7 +1516,7 @@ var ReadingGutter = class {
       this.cards.hideAll();
       return;
     }
-    this.applyMargins(settings);
+    this.applyMargins(settings, gutterContent(annotations, outcomes));
     const numbers = numberComments(annotations, outcomes);
     const wanted = /* @__PURE__ */ new Set();
     for (const annotation of annotations) {
@@ -1543,10 +1576,11 @@ var ReadingGutter = class {
     this.cards.mount(scroller);
     return true;
   }
-  applyMargins(settings) {
+  applyMargins(settings, content) {
     var _a, _b;
     this.width = clampGutterWidth(settings.gutterWidth);
-    this.activeSides = activeGutterSides(settings);
+    this.openTypes = gutterOpenTypes(settings, content, this.openTypes);
+    this.activeSides = activeGutterSides(settings, this.openTypes);
     (_a = this.scroller) == null ? void 0 : _a.toggleClass("mdann-gutter-on-left", this.activeSides.left);
     (_b = this.scroller) == null ? void 0 : _b.toggleClass("mdann-gutter-on-right", this.activeSides.right);
     this.cards.setLayerWidth(this.width);
@@ -2096,6 +2130,16 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
       () => this.plugin.settings.gutterCommentsSide,
       (v) => {
         this.plugin.settings.gutterCommentsSide = v;
+      }
+    );
+    new import_obsidian3.Setting(containerEl).setName("When to reserve the margin").setHeading();
+    this.renderToggle(
+      containerEl,
+      "Only on notes with annotations",
+      "Keep the margin for notes that actually have something to show in it, instead of every note. The text reflows when a note gains its first annotation or loses its last \u2014 the change is animated, and a margin already open stays open while an annotation is being re-anchored",
+      () => this.plugin.settings.gutterOnlyWhenAnnotated,
+      (v) => {
+        this.plugin.settings.gutterOnlyWhenAnnotated = v;
       }
     );
     new import_obsidian3.Setting(containerEl).setName("Size").setHeading();

@@ -200,6 +200,17 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 			},
 		);
 
+		new Setting(containerEl).setName('When to reserve the margin').setHeading();
+		this.renderToggle(
+			containerEl,
+			'Only on notes with annotations',
+			'Keep the margin for notes that actually have something to show in it, instead of every note. The text reflows when a note gains its first annotation or loses its last — the change is animated, and a margin already open stays open while an annotation is being re-anchored',
+			() => this.plugin.settings.gutterOnlyWhenAnnotated,
+			(v) => {
+				this.plugin.settings.gutterOnlyWhenAnnotated = v;
+			},
+		);
+
 		new Setting(containerEl).setName('Size').setHeading();
 		new Setting(containerEl)
 			.setName('Gutter width')

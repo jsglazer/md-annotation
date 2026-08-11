@@ -82,8 +82,11 @@ Notes can be shown as cards in the page margin instead of (or as well as) in the
 | **Show annotations / comments in the gutter** | Switch each type on separately (also toggled by its command) |
 | **Annotation / comment gutter side** | Which margin each type uses — they can sit in opposite margins |
 | **Gutter width** | Room each gutter takes from the note, 140–480 px |
+| **Only on notes with annotations** | Reserve the margin per note instead of vault-wide — on by default |
 
 It works in Live Preview, Source mode and Reading View. Clicking a card scrolls the sidebar to the matching entry when the sidebar is already open. Orphaned annotations have no line to sit beside, so they stay in the sidebar where they can be re-anchored.
+
+**Only on notes with annotations** keeps unannotated notes at their full width and opens the margin the first time a note has a card to put there — per type, so a note holding only comments opens only the comment margin. The reflow is animated, and a margin that is already open stays open while an annotation is temporarily orphaned, so editing the very text a highlight is anchored to never collapses the page under your cursor. Turn it off to keep a constant text width across every note.
 
 ### Note Toolbar button highlight
 

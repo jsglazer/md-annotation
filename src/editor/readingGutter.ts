@@ -20,11 +20,13 @@ import { numberComments } from '../core/ordering';
 import type { GutterSide, MdAnnotationSettings } from '../core/settings';
 import { GUTTER_DEFAULT_WIDTH, clampGutterWidth } from '../core/settings';
 import type { Annotation } from '../core/types';
-import type { GutterHost, Placement } from './gutterCards';
+import type { GutterContent, GutterHost, GutterTypes, Placement } from './gutterCards';
 import {
 	CardLayers,
 	MIN_TEXT_WIDTH,
 	activeGutterSides,
+	gutterContent,
+	gutterOpenTypes,
 	gutterShows,
 	gutterSideFor,
 } from './gutterCards';
@@ -53,6 +55,8 @@ export class ReadingGutter {
 	private path = '';
 	private width = GUTTER_DEFAULT_WIDTH;
 	private activeSides: Record<GutterSide, boolean> = { left: false, right: false };
+	// Which types currently have an open margin — see gutterOpenTypes.
+	private openTypes: GutterTypes = { annotations: false, comments: false };
 	private suppressed = false;
 	private frame: number | null = null;
 	private destroyed = false;
@@ -107,7 +111,7 @@ export class ReadingGutter {
 			this.cards.hideAll();
 			return;
 		}
-		this.applyMargins(settings);
+		this.applyMargins(settings, gutterContent(annotations, outcomes));
 
 		const numbers = numberComments(annotations, outcomes);
 		const wanted = new Set<string>();
@@ -174,9 +178,10 @@ export class ReadingGutter {
 		return true;
 	}
 
-	private applyMargins(settings: MdAnnotationSettings): void {
+	private applyMargins(settings: MdAnnotationSettings, content: GutterContent): void {
 		this.width = clampGutterWidth(settings.gutterWidth);
-		this.activeSides = activeGutterSides(settings);
+		this.openTypes = gutterOpenTypes(settings, content, this.openTypes);
+		this.activeSides = activeGutterSides(settings, this.openTypes);
 		this.scroller?.toggleClass('mdann-gutter-on-left', this.activeSides.left);
 		this.scroller?.toggleClass('mdann-gutter-on-right', this.activeSides.right);
 		this.cards.setLayerWidth(this.width);
