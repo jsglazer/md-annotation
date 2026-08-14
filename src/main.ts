@@ -504,7 +504,7 @@ export default class MdAnnotationPlugin extends Plugin {
 		if (path === null) return;
 		const state = this.states.get(path);
 		if (!state) return;
-		applyEditorDecorations(view, state.annotations, state.outcomes, this.settings, (id) => {
+		applyEditorDecorations(view, state.body, state.annotations, state.outcomes, this.settings, (id) => {
 			this.revealAnnotation(path, id);
 		});
 		this.gutters.get(view)?.sync(path, state.annotations, state.outcomes, this.settings);

@@ -262,12 +262,25 @@ describe('gutterStyleVars', () => {
 		const yellow = s.formatStyles['Yellow'];
 		if (!yellow) throw new Error('default format missing');
 		yellow.light.bg.color = 'red; } body { display:none';
-		yellow.fontSize = '12px; color: red';
+		s.gutterAnnotationsFontSize = '12px; color: red';
 		const vars = gutterStyleVars('highlight', 'Yellow', s);
 		expect(vars['--mdann-g-light-bg']).toBeUndefined();
 		expect(vars['font-size']).toBeUndefined();
-		yellow.fontSize = '0.9em';
+		s.gutterAnnotationsFontSize = '0.9em';
 		expect(gutterStyleVars('highlight', 'Yellow', s)['font-size']).toBe('0.9em');
+	});
+
+	it('uses the gutter font size, not the format\'s own fontSize — it never affects the sidebar', () => {
+		const s = defaultSettings();
+		const yellow = s.formatStyles['Yellow'];
+		if (!yellow) throw new Error('default format missing');
+		yellow.fontSize = '20px';
+		expect(gutterStyleVars('highlight', 'Yellow', s)['font-size']).toBeUndefined();
+		s.gutterAnnotationsFontSize = '13px';
+		expect(gutterStyleVars('highlight', 'Yellow', s)['font-size']).toBe('13px');
+		expect(gutterStyleVars('comment', '', s)['font-size']).toBeUndefined();
+		s.gutterCommentsFontSize = '15px';
+		expect(gutterStyleVars('comment', '', s)['font-size']).toBe('15px');
 	});
 
 	it('uses the dedicated comment style for comments', () => {
@@ -284,7 +297,7 @@ describe('gutterStyleVars', () => {
 		if (!yellow) throw new Error('default format missing');
 		yellow.light.fr = { enabled: true, color: '#111111' };
 		yellow.dark.fr = { enabled: true, color: '#eeeeee' };
-		yellow.fontSize = '11px';
+		s.gutterAnnotationsFontSize = '11px';
 		expect(Object.keys(gutterStyleVars('highlight', 'Yellow', s)).sort()).toEqual(
 			[...GUTTER_STYLE_PROPS].sort(),
 		);

@@ -22,6 +22,7 @@ import {
 	highlightStyleText,
 	markerClasses,
 } from '../core/settings';
+import { overlapsAny, tableRanges } from '../core/tables';
 import type { Annotation } from '../core/types';
 
 // Replaces the current decoration set wholesale after a resolution pass.
@@ -164,14 +165,23 @@ class CommentMarkerWidget extends WidgetType {
 //   - annotationFormattingEnabled off → no highlight decorations
 //   - commentsFormattingEnabled off → range comments undecorated, markers plain
 //   - commentsHiddenEnabled on → no markers at all
+//
+// A range inside a table is skipped entirely (see core/tables.ts for why):
+// Obsidian renders the table as one block widget, and a mark/widget
+// decoration overlapping it crashes decoration rendering for the WHOLE
+// editor, not just that one annotation. Such an annotation still exists —
+// it is fully editable from the sidebar, and still renders in Reading view —
+// it just draws nothing in Live Preview/Source mode.
 export function applyEditorDecorations(
 	view: EditorView,
+	body: string,
 	annotations: ReadonlyArray<Annotation>,
 	outcomes: ReadonlyMap<string, MatchResult>,
 	settings: MdAnnotationSettings,
 	onMarkerClick: (annotationId: string) => void,
 ): void {
 	const docLength = view.state.doc.length;
+	const tables = tableRanges(body);
 	const ranges: Array<{ from: number; to: number; annotation: Annotation }> = [];
 	for (const annotation of annotations) {
 		const outcome = outcomes.get(annotation.id);
@@ -179,6 +189,7 @@ export function applyEditorDecorations(
 		const from = Math.max(0, Math.min(outcome.start, docLength));
 		const to = Math.min(outcome.end, docLength);
 		if (from > to) continue;
+		if (overlapsAny(tables, from, to)) continue;
 		if (from === to) {
 			// Point comment marker.
 			if (annotation.type !== 'comment' || settings.commentsHiddenEnabled) continue;

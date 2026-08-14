@@ -620,6 +620,8 @@ function defaultSettings() {
     gutterCommentsSide: "right",
     gutterWidth: GUTTER_DEFAULT_WIDTH,
     gutterOnlyWhenAnnotated: true,
+    gutterAnnotationsFontSize: "",
+    gutterCommentsFontSize: "",
     gutterAnnotationsToolbar: makeToolbarHighlight(
       partStyle("", "#fff3a3"),
       partStyle("", "#7a6f1f")
@@ -711,6 +713,12 @@ function normalizeSettings(raw) {
   s.gutterAnnotationsSide = readGutterSide(r.gutterAnnotationsSide, s.gutterAnnotationsSide);
   s.gutterCommentsSide = readGutterSide(r.gutterCommentsSide, s.gutterCommentsSide);
   if (typeof r.gutterWidth === "number") s.gutterWidth = clampGutterWidth(r.gutterWidth);
+  if (typeof r.gutterAnnotationsFontSize === "string") {
+    s.gutterAnnotationsFontSize = r.gutterAnnotationsFontSize;
+  }
+  if (typeof r.gutterCommentsFontSize === "string") {
+    s.gutterCommentsFontSize = r.gutterCommentsFontSize;
+  }
   s.gutterAnnotationsToolbar = readToolbarHighlight(
     r.gutterAnnotationsToolbar,
     s.gutterAnnotationsToolbar
@@ -873,7 +881,7 @@ function highlightStyleText(annotationType, formatName, settings) {
 function gutterStyleVars(annotationType, formatName, settings) {
   const resolved = resolveStyle(annotationType, formatName, settings);
   if (!resolved) return {};
-  const { style, fontSize } = resolved;
+  const { style } = resolved;
   const vars = {};
   const put = (name, opt) => {
     const color = enabledColor(opt);
@@ -883,7 +891,8 @@ function gutterStyleVars(annotationType, formatName, settings) {
   put("--mdann-g-light-bg", style.light.bg);
   put("--mdann-g-dark-fg", style.dark.fr);
   put("--mdann-g-dark-bg", style.dark.bg);
-  if (isValidFontSize(fontSize)) vars["font-size"] = fontSize.trim();
+  const gutterFontSize = annotationType === "comment" ? settings.gutterCommentsFontSize : settings.gutterAnnotationsFontSize;
+  if (isValidFontSize(gutterFontSize)) vars["font-size"] = gutterFontSize.trim();
   return vars;
 }
 var GUTTER_STYLE_PROPS = [
@@ -1319,6 +1328,54 @@ function anchorCoords(view, pos) {
 var import_state = require("@codemirror/state");
 var import_view = require("@codemirror/view");
 var import_obsidian = require("obsidian");
+
+// src/core/tables.ts
+var DELIMITER_ROW = /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?\s*$/;
+function looksLikeTableRow(line) {
+  return line.includes("|");
+}
+function isDelimiterRow(line) {
+  return line.includes("-") && DELIMITER_ROW.test(line);
+}
+function tableRanges(text) {
+  var _a, _b, _c;
+  const lines = text.split("\n");
+  const lineStarts = [];
+  let offset = 0;
+  for (const line of lines) {
+    lineStarts.push(offset);
+    offset += line.length + 1;
+  }
+  const ranges = [];
+  let i = 0;
+  while (i < lines.length) {
+    const header = lines[i];
+    const delimiter = lines[i + 1];
+    if (header !== void 0 && delimiter !== void 0 && looksLikeTableRow(header) && isDelimiterRow(delimiter)) {
+      let endLine = i + 1;
+      let j = i + 2;
+      while (j < lines.length) {
+        const row = lines[j];
+        if (row === void 0 || row.trim() === "" || !looksLikeTableRow(row)) break;
+        endLine = j;
+        j++;
+      }
+      const start = (_a = lineStarts[i]) != null ? _a : 0;
+      const lastLine = (_b = lines[endLine]) != null ? _b : "";
+      const end = ((_c = lineStarts[endLine]) != null ? _c : 0) + lastLine.length;
+      ranges.push({ start, end });
+      i = j;
+      continue;
+    }
+    i++;
+  }
+  return ranges;
+}
+function overlapsAny(ranges, from, to) {
+  return ranges.some((r) => from < r.end && to > r.start);
+}
+
+// src/editor/livePreview.ts
 var setAnnotationDecorations = import_state.StateEffect.define({
   map: (value, mapping) => value.map(mapping)
 });
@@ -1406,8 +1463,9 @@ var CommentMarkerWidget = class extends import_view.WidgetType {
     return false;
   }
 };
-function applyEditorDecorations(view, annotations, outcomes, settings, onMarkerClick) {
+function applyEditorDecorations(view, body, annotations, outcomes, settings, onMarkerClick) {
   const docLength = view.state.doc.length;
+  const tables = tableRanges(body);
   const ranges = [];
   for (const annotation of annotations) {
     const outcome = outcomes.get(annotation.id);
@@ -1415,6 +1473,7 @@ function applyEditorDecorations(view, annotations, outcomes, settings, onMarkerC
     const from = Math.max(0, Math.min(outcome.start, docLength));
     const to = Math.min(outcome.end, docLength);
     if (from > to) continue;
+    if (overlapsAny(tables, from, to)) continue;
     if (from === to) {
       if (annotation.type !== "comment" || settings.commentsHiddenEnabled) continue;
       ranges.push({ from, to, annotation });
@@ -2013,12 +2072,21 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
     this.pendingFormatName = "";
     this.activeTab = "general";
     this.saveTimer = null;
+    // A redraw triggered by an in-tab control (renaming a format, picking a
+    // toolbar item, importing formats…) should leave the scroll position alone
+    // — display() rebuilds the whole pane from scratch, which would otherwise
+    // snap it back to the top every time. Only an explicit tab-bar click resets
+    // it, since that is a real navigation to different content.
+    this.resetScrollOnDisplay = false;
   }
   isDarkTheme() {
     return this.containerEl.ownerDocument.body.classList.contains("theme-dark");
   }
   display() {
     const { containerEl } = this;
+    const prevScroll = containerEl.scrollTop;
+    const resetScroll = this.resetScrollOnDisplay;
+    this.resetScrollOnDisplay = false;
     containerEl.empty();
     containerEl.addClass("mdann-settings");
     containerEl.createDiv({
@@ -2039,22 +2107,20 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
       });
       btn.addEventListener("click", () => {
         this.activeTab = tab.id;
+        this.resetScrollOnDisplay = true;
         this.display();
       });
     }
     if (this.activeTab === "annotations") {
       this.renderAnnotationsTab(containerEl);
-      return;
-    }
-    if (this.activeTab === "comments") {
+    } else if (this.activeTab === "comments") {
       this.renderCommentsTab(containerEl);
-      return;
-    }
-    if (this.activeTab === "gutter") {
+    } else if (this.activeTab === "gutter") {
       this.renderGutterTab(containerEl);
-      return;
+    } else {
+      this.renderGeneralTab(containerEl);
     }
-    this.renderGeneralTab(containerEl);
+    containerEl.scrollTop = resetScroll ? 0 : prevScroll;
   }
   async saveAndRefresh() {
     await this.plugin.saveSettings();
@@ -2148,6 +2214,22 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
         this.plugin.settings.gutterWidth = clampGutterWidth(value);
         this.saveDebounced();
       })
+    );
+    this.renderGutterFontSize(
+      containerEl,
+      "Annotation card font size",
+      () => this.plugin.settings.gutterAnnotationsFontSize,
+      (v) => {
+        this.plugin.settings.gutterAnnotationsFontSize = v;
+      }
+    );
+    this.renderGutterFontSize(
+      containerEl,
+      "Comment card font size",
+      () => this.plugin.settings.gutterCommentsFontSize,
+      (v) => {
+        this.plugin.settings.gutterCommentsFontSize = v;
+      }
     );
     this.renderToolbarHighlightSection(containerEl);
   }
@@ -2256,6 +2338,28 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
         await this.saveAndRefresh();
       })
     );
+  }
+  // Font size for one type's gutter cards. Separate from a format's own Size
+  // column (Annotations/Comments tabs) — that one styles the in-text highlight
+  // and the sidebar quote chip; this one styles only the gutter card, on
+  // either editor or Reading-view gutters. Same free-text validation as the
+  // per-format field: a plain CSS length or bare keyword, reverting on blur
+  // otherwise.
+  renderGutterFontSize(containerEl, name, getValue, setValue) {
+    new import_obsidian3.Setting(containerEl).setName(name).setDesc("Example: 13px. Leave blank to use the default. Does not affect the sidebar.").addText((text) => {
+      text.setPlaceholder("\u2014").setValue(getValue());
+      text.inputEl.addEventListener("change", () => {
+        const value = text.getValue().trim();
+        if (value !== "" && !isValidFontSize(value)) {
+          new import_obsidian3.Notice(`"${value}" is not a valid font size`);
+          text.setValue(getValue());
+          return;
+        }
+        setValue(value);
+        text.setValue(value);
+        void this.saveAndRefresh();
+      });
+    });
   }
   // The three text ⇄ sidebar navigation behaviours, each independently
   // switchable. All default on.
@@ -3016,7 +3120,7 @@ var AnnotationSidebarView = class extends import_obsidian5.ItemView {
       const reason = outcome && outcome.status === "orphaned" && outcome.reason === "ambiguous" ? "Multiple equally likely locations \u2014 select the right text and re-anchor." : "Original text not found \u2014 select the new text and re-anchor.";
       card.createEl("div", { text: reason, cls: "mdann-orphan-reason" });
     }
-    this.renderFormatSelector(card, path, annotation);
+    this.renderFormatSelector(card, path, annotation, isOrphan);
     const comment = card.createEl("textarea", {
       cls: "mdann-comment-input",
       attr: { rows: "2", placeholder: annotation.type === "comment" ? "Comment\u2026" : "Note\u2026" }
@@ -3032,28 +3136,18 @@ var AnnotationSidebarView = class extends import_obsidian5.ItemView {
     const author = annotation.author === "" ? "unknown author" : annotation.author;
     const created = annotation.dateCreate.slice(0, 10);
     meta.setText(`${author} \xB7 ${created} \xB7 ${annotation.status}`);
-    const buttons = card.createDiv({ cls: "mdann-buttons" });
     if (isOrphan) {
+      const buttons = card.createDiv({ cls: "mdann-buttons" });
       const reanchor = buttons.createEl("button", { text: "Re-anchor to selection" });
       reanchor.addEventListener("click", () => {
         this.plugin.reanchorFromSelection(path, annotation.id);
       });
-    } else {
-      const toggle = buttons.createEl("button", {
-        text: annotation.status === "open" ? "Close" : "Reopen"
-      });
-      toggle.addEventListener("click", () => {
-        this.plugin.setStatus(path, annotation.id, annotation.status === "open" ? "closed" : "open");
-      });
     }
-    const del = buttons.createEl("button", { text: "Delete", cls: "mod-warning" });
-    del.addEventListener("click", () => {
-      this.confirmDelete(annotation, () => this.plugin.deleteAnnotation(path, annotation.id));
-    });
   }
-  // A format dropdown bound to one annotation. Comments lead with a "Comment"
+  // A format dropdown bound to one annotation, plus (in the same row) the
+  // status toggle and delete icon buttons. Comments lead with a "Comment"
   // option (the dedicated comment style, stored as the empty format name).
-  renderFormatSelector(card, path, annotation) {
+  renderFormatSelector(card, path, annotation, isOrphan) {
     const row = card.createDiv({ cls: "mdann-format-select-row" });
     row.createEl("span", { text: "Format", cls: "mdann-format-select-label" });
     const select = row.createEl("select", { cls: "dropdown mdann-format-select" });
@@ -3075,6 +3169,29 @@ var AnnotationSidebarView = class extends import_obsidian5.ItemView {
     }
     select.addEventListener("change", () => {
       this.plugin.setFormat(path, annotation.id, select.value);
+    });
+    if (!isOrphan) {
+      const statusBtn = row.createEl("button", {
+        cls: "mdann-icon-btn mdann-status-btn",
+        attr: {
+          type: "button",
+          "aria-label": annotation.status === "open" ? "Mark closed" : "Reopen"
+        }
+      });
+      statusBtn.createSpan({
+        cls: "mdann-status-icon" + (annotation.status === "closed" ? " is-closed" : "")
+      });
+      statusBtn.addEventListener("click", () => {
+        this.plugin.setStatus(path, annotation.id, annotation.status === "open" ? "closed" : "open");
+      });
+    }
+    const delBtn = row.createEl("button", {
+      cls: "mdann-icon-btn mdann-delete-btn",
+      attr: { type: "button", "aria-label": "Delete" }
+    });
+    (0, import_obsidian5.setIcon)(delBtn, "circle-x");
+    delBtn.addEventListener("click", () => {
+      this.confirmDelete(annotation, () => this.plugin.deleteAnnotation(path, annotation.id));
     });
   }
   confirmDelete(annotation, onConfirm) {
@@ -3518,7 +3635,7 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
     if (path === null) return;
     const state = this.states.get(path);
     if (!state) return;
-    applyEditorDecorations(view, state.annotations, state.outcomes, this.settings, (id) => {
+    applyEditorDecorations(view, state.body, state.annotations, state.outcomes, this.settings, (id) => {
       this.revealAnnotation(path, id);
     });
     (_a = this.gutters.get(view)) == null ? void 0 : _a.sync(path, state.annotations, state.outcomes, this.settings);

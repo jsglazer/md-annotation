@@ -8,7 +8,7 @@
 // scroll the list to either end.
 
 import type { App, WorkspaceLeaf } from 'obsidian';
-import { ItemView, Modal } from 'obsidian';
+import { ItemView, Modal, setIcon } from 'obsidian';
 
 import { lineNumberAt, numberComments } from '../core/ordering';
 import { highlightClasses, highlightStyleVars } from '../core/settings';
@@ -372,8 +372,9 @@ export class AnnotationSidebarView extends ItemView {
 
 		// Highlights and comments both get a format selector so an annotation can
 		// be reassigned after creation (formats are keyed by name). Comments also
-		// offer the dedicated "Comment" style (the empty format name).
-		this.renderFormatSelector(card, path, annotation);
+		// offer the dedicated "Comment" style (the empty format name). The status
+		// and delete controls live in the same row, as icon-only buttons.
+		this.renderFormatSelector(card, path, annotation, isOrphan);
 
 		const comment = card.createEl('textarea', {
 			cls: 'mdann-comment-input',
@@ -394,29 +395,24 @@ export class AnnotationSidebarView extends ItemView {
 		const created = annotation.dateCreate.slice(0, 10);
 		meta.setText(`${author} · ${created} · ${annotation.status}`);
 
-		const buttons = card.createDiv({ cls: 'mdann-buttons' });
 		if (isOrphan) {
+			const buttons = card.createDiv({ cls: 'mdann-buttons' });
 			const reanchor = buttons.createEl('button', { text: 'Re-anchor to selection' });
 			reanchor.addEventListener('click', () => {
 				this.plugin.reanchorFromSelection(path, annotation.id);
 			});
-		} else {
-			const toggle = buttons.createEl('button', {
-				text: annotation.status === 'open' ? 'Close' : 'Reopen',
-			});
-			toggle.addEventListener('click', () => {
-				this.plugin.setStatus(path, annotation.id, annotation.status === 'open' ? 'closed' : 'open');
-			});
 		}
-		const del = buttons.createEl('button', { text: 'Delete', cls: 'mod-warning' });
-		del.addEventListener('click', () => {
-			this.confirmDelete(annotation, () => this.plugin.deleteAnnotation(path, annotation.id));
-		});
 	}
 
-	// A format dropdown bound to one annotation. Comments lead with a "Comment"
+	// A format dropdown bound to one annotation, plus (in the same row) the
+	// status toggle and delete icon buttons. Comments lead with a "Comment"
 	// option (the dedicated comment style, stored as the empty format name).
-	private renderFormatSelector(card: HTMLElement, path: string, annotation: Annotation): void {
+	private renderFormatSelector(
+		card: HTMLElement,
+		path: string,
+		annotation: Annotation,
+		isOrphan: boolean,
+	): void {
 		const row = card.createDiv({ cls: 'mdann-format-select-row' });
 		row.createEl('span', { text: 'Format', cls: 'mdann-format-select-label' });
 		const select = row.createEl('select', { cls: 'dropdown mdann-format-select' });
@@ -440,6 +436,31 @@ export class AnnotationSidebarView extends ItemView {
 		}
 		select.addEventListener('change', () => {
 			this.plugin.setFormat(path, annotation.id, select.value);
+		});
+
+		if (!isOrphan) {
+			const statusBtn = row.createEl('button', {
+				cls: 'mdann-icon-btn mdann-status-btn',
+				attr: {
+					type: 'button',
+					'aria-label': annotation.status === 'open' ? 'Mark closed' : 'Reopen',
+				},
+			});
+			statusBtn.createSpan({
+				cls: 'mdann-status-icon' + (annotation.status === 'closed' ? ' is-closed' : ''),
+			});
+			statusBtn.addEventListener('click', () => {
+				this.plugin.setStatus(path, annotation.id, annotation.status === 'open' ? 'closed' : 'open');
+			});
+		}
+
+		const delBtn = row.createEl('button', {
+			cls: 'mdann-icon-btn mdann-delete-btn',
+			attr: { type: 'button', 'aria-label': 'Delete' },
+		});
+		setIcon(delBtn, 'circle-x');
+		delBtn.addEventListener('click', () => {
+			this.confirmDelete(annotation, () => this.plugin.deleteAnnotation(path, annotation.id));
 		});
 	}
 

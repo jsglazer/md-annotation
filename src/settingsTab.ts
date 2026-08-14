@@ -53,6 +53,12 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 	private pendingFormatName = '';
 	private activeTab: TabId = 'general';
 	private saveTimer: number | null = null;
+	// A redraw triggered by an in-tab control (renaming a format, picking a
+	// toolbar item, importing formats…) should leave the scroll position alone
+	// — display() rebuilds the whole pane from scratch, which would otherwise
+	// snap it back to the top every time. Only an explicit tab-bar click resets
+	// it, since that is a real navigation to different content.
+	private resetScrollOnDisplay = false;
 
 	constructor(
 		app: App,
@@ -67,6 +73,14 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 
 	display(): void {
 		const { containerEl } = this;
+		// display() fully rebuilds the pane, which would otherwise reset the
+		// scroll position to the top on every redraw — including ones triggered
+		// by a control inside the currently visible tab (see
+		// resetScrollOnDisplay above).
+		const prevScroll = containerEl.scrollTop;
+		const resetScroll = this.resetScrollOnDisplay;
+		this.resetScrollOnDisplay = false;
+
 		containerEl.empty();
 		containerEl.addClass('mdann-settings');
 
@@ -89,23 +103,22 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 			});
 			btn.addEventListener('click', () => {
 				this.activeTab = tab.id;
+				this.resetScrollOnDisplay = true;
 				this.display();
 			});
 		}
 
 		if (this.activeTab === 'annotations') {
 			this.renderAnnotationsTab(containerEl);
-			return;
-		}
-		if (this.activeTab === 'comments') {
+		} else if (this.activeTab === 'comments') {
 			this.renderCommentsTab(containerEl);
-			return;
-		}
-		if (this.activeTab === 'gutter') {
+		} else if (this.activeTab === 'gutter') {
 			this.renderGutterTab(containerEl);
-			return;
+		} else {
+			this.renderGeneralTab(containerEl);
 		}
-		this.renderGeneralTab(containerEl);
+
+		containerEl.scrollTop = resetScroll ? 0 : prevScroll;
 	}
 
 	private async saveAndRefresh(): Promise<void> {
@@ -227,6 +240,22 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 						this.saveDebounced();
 					}),
 			);
+		this.renderGutterFontSize(
+			containerEl,
+			'Annotation card font size',
+			() => this.plugin.settings.gutterAnnotationsFontSize,
+			(v) => {
+				this.plugin.settings.gutterAnnotationsFontSize = v;
+			},
+		);
+		this.renderGutterFontSize(
+			containerEl,
+			'Comment card font size',
+			() => this.plugin.settings.gutterCommentsFontSize,
+			(v) => {
+				this.plugin.settings.gutterCommentsFontSize = v;
+			},
+		);
 
 		this.renderToolbarHighlightSection(containerEl);
 	}
@@ -384,6 +413,37 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 						await this.saveAndRefresh();
 					}),
 			);
+	}
+
+	// Font size for one type's gutter cards. Separate from a format's own Size
+	// column (Annotations/Comments tabs) — that one styles the in-text highlight
+	// and the sidebar quote chip; this one styles only the gutter card, on
+	// either editor or Reading-view gutters. Same free-text validation as the
+	// per-format field: a plain CSS length or bare keyword, reverting on blur
+	// otherwise.
+	private renderGutterFontSize(
+		containerEl: HTMLElement,
+		name: string,
+		getValue: () => string,
+		setValue: (v: string) => void,
+	): void {
+		new Setting(containerEl)
+			.setName(name)
+			.setDesc('Example: 13px. Leave blank to use the default. Does not affect the sidebar.')
+			.addText((text) => {
+				text.setPlaceholder('—').setValue(getValue());
+				text.inputEl.addEventListener('change', () => {
+					const value = text.getValue().trim();
+					if (value !== '' && !isValidFontSize(value)) {
+						new Notice(`"${value}" is not a valid font size`);
+						text.setValue(getValue());
+						return;
+					}
+					setValue(value);
+					text.setValue(value);
+					void this.saveAndRefresh();
+				});
+			});
 	}
 
 	// The three text ⇄ sidebar navigation behaviours, each independently

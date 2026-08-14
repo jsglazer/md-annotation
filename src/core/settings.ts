@@ -74,6 +74,12 @@ export interface MdAnnotationSettings {
 	// Reserve the margin only on notes that actually have something to put in
 	// it, rather than on every note the moment the gutter is switched on.
 	gutterOnlyWhenAnnotated: boolean;
+	// Font size for gutter cards only — deliberately separate from a format's
+	// own fontSize (which governs the in-text highlight and the sidebar quote
+	// chip) so the two surfaces can be sized independently. Blank uses the
+	// theme's default.
+	gutterAnnotationsFontSize: string;
+	gutterCommentsFontSize: string;
 
 	// Note Toolbar items that follow the two gutter toggles, so a toolbar shows
 	// at a glance which gutters are on. Inert until an item is chosen.
@@ -131,6 +137,8 @@ export function defaultSettings(): MdAnnotationSettings {
 		gutterCommentsSide: 'right',
 		gutterWidth: GUTTER_DEFAULT_WIDTH,
 		gutterOnlyWhenAnnotated: true,
+		gutterAnnotationsFontSize: '',
+		gutterCommentsFontSize: '',
 		gutterAnnotationsToolbar: makeToolbarHighlight(
 			partStyle('', '#fff3a3'),
 			partStyle('', '#7a6f1f'),
@@ -248,6 +256,12 @@ export function normalizeSettings(raw: unknown): MdAnnotationSettings {
 	s.gutterAnnotationsSide = readGutterSide(r.gutterAnnotationsSide, s.gutterAnnotationsSide);
 	s.gutterCommentsSide = readGutterSide(r.gutterCommentsSide, s.gutterCommentsSide);
 	if (typeof r.gutterWidth === 'number') s.gutterWidth = clampGutterWidth(r.gutterWidth);
+	if (typeof r.gutterAnnotationsFontSize === 'string') {
+		s.gutterAnnotationsFontSize = r.gutterAnnotationsFontSize;
+	}
+	if (typeof r.gutterCommentsFontSize === 'string') {
+		s.gutterCommentsFontSize = r.gutterCommentsFontSize;
+	}
 	s.gutterAnnotationsToolbar = readToolbarHighlight(
 		r.gutterAnnotationsToolbar,
 		s.gutterAnnotationsToolbar,
@@ -522,6 +536,11 @@ export function highlightStyleText(
 // color is simply omitted so the CSS `var(--…, fallback)` in styles.css takes
 // over — a card with no Fr color still gets a visible border from the theme.
 // The card's border colour is the format's Fr (text) colour by design.
+//
+// Font size is deliberately NOT the format's own fontSize (that one governs
+// the in-text highlight and the sidebar quote chip) — the gutter has its own
+// dedicated size per type, set on the Gutter settings tab, so it never
+// affects the sidebar.
 export function gutterStyleVars(
 	annotationType: 'highlight' | 'comment',
 	formatName: string,
@@ -529,7 +548,7 @@ export function gutterStyleVars(
 ): Record<string, string> {
 	const resolved = resolveStyle(annotationType, formatName, settings);
 	if (!resolved) return {};
-	const { style, fontSize } = resolved;
+	const { style } = resolved;
 	const vars: Record<string, string> = {};
 	const put = (name: string, opt: ColorOption): void => {
 		const color = enabledColor(opt);
@@ -539,7 +558,11 @@ export function gutterStyleVars(
 	put('--mdann-g-light-bg', style.light.bg);
 	put('--mdann-g-dark-fg', style.dark.fr);
 	put('--mdann-g-dark-bg', style.dark.bg);
-	if (isValidFontSize(fontSize)) vars['font-size'] = fontSize.trim();
+	const gutterFontSize =
+		annotationType === 'comment'
+			? settings.gutterCommentsFontSize
+			: settings.gutterAnnotationsFontSize;
+	if (isValidFontSize(gutterFontSize)) vars['font-size'] = gutterFontSize.trim();
 	return vars;
 }
 
