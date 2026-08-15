@@ -14,6 +14,8 @@ import type { MarkdownPostProcessorContext, MarkdownSectionInformation } from 'o
 import { MarkdownRenderChild, setIcon } from 'obsidian';
 
 import { captureSelector, resolveSelector } from '../core/matcher';
+import type { TextRange } from '../core/tables';
+import { matchTableGrid, tableGrids } from '../core/tables';
 import { numberComments } from '../core/ordering';
 import type { MdAnnotationSettings } from '../core/settings';
 import {
@@ -92,6 +94,30 @@ class HighlightRenderChild extends MarkdownRenderChild {
 		return this.spans.length + this.markers.length;
 	}
 
+	// The flat text this element renders — what a caller compares against the
+	// markdown source to decide whether an exact offset can be used.
+	renderedText(): string {
+		return collectTextSlices(this.containerEl).text;
+	}
+
+	// Where an annotation goes within the rendered text. `at` is an already
+	// known offset pair (used for a table cell, whose exact position in the
+	// note is established structurally rather than by matching); without it the
+	// staged matcher resolves the selector, which is what absorbs the
+	// difference between markdown source and rendered text.
+	private locate(
+		text: string,
+		selector: TextQuoteSelector,
+		at: TextRange | null,
+	): { start: number; end: number } | null {
+		if (at) {
+			if (at.start < 0 || at.end > text.length || at.start > at.end) return null;
+			return { start: at.start, end: at.end };
+		}
+		const result = resolveSelector(text, selector);
+		return result.status === 'matched' ? { start: result.start, end: result.end } : null;
+	}
+
 	// Resolve `selector` against this element's rendered text and wrap the
 	// match. The rendered text differs from the markdown source (syntax is
 	// stripped), which is exactly what the staged matcher tolerates.
@@ -101,26 +127,27 @@ class HighlightRenderChild extends MarkdownRenderChild {
 		styleVars: Record<string, string>,
 		annotationId: string,
 		onClick: () => void,
+		at: TextRange | null = null,
 	): void {
 		const { text, slices } = collectTextSlices(this.containerEl);
 		if (text === '') return;
-		const result = resolveSelector(text, selector);
-		if (result.status !== 'matched') return;
-		this.wrapRange(slices, result.start, result.end, classes, styleVars, annotationId, onClick);
+		const found = this.locate(text, selector, at);
+		if (!found) return;
+		this.wrapRange(slices, found.start, found.end, classes, styleVars, annotationId, onClick);
 	}
 
 	// Insert an invisible, zero-width element at a point selector's position.
 	// Used when the marker itself is deliberately not drawn but the Reading-view
 	// gutter still needs somewhere to align that comment's card to.
-	tryAnchor(selector: TextQuoteSelector, annotationId: string): void {
+	tryAnchor(selector: TextQuoteSelector, annotationId: string, at: TextRange | null = null): void {
 		const { text, slices } = collectTextSlices(this.containerEl);
 		if (text === '') return;
-		const result = resolveSelector(text, selector);
-		if (result.status !== 'matched') return;
+		const found = this.locate(text, selector, at);
+		if (!found) return;
 		const span = this.containerEl.ownerDocument.createElement('span');
 		span.className = ANCHOR_CLASS;
 		span.setAttribute('data-mdann-id', annotationId);
-		if (this.insertAt(slices, result.start, span)) this.markers.push(span);
+		if (this.insertAt(slices, found.start, span)) this.markers.push(span);
 	}
 
 	// Resolve a point selector (empty quote) against the rendered text and
@@ -132,12 +159,13 @@ class HighlightRenderChild extends MarkdownRenderChild {
 		annotationId: string,
 		label: string,
 		onClick: () => void,
+		at: TextRange | null = null,
 	): void {
 		const { text, slices } = collectTextSlices(this.containerEl);
 		if (text === '') return;
-		const result = resolveSelector(text, selector);
-		if (result.status !== 'matched') return;
-		const pos = result.start;
+		const found = this.locate(text, selector, at);
+		if (!found) return;
+		const pos = found.start;
 
 		const doc = this.containerEl.ownerDocument;
 		const span = doc.createElement('span');
@@ -244,6 +272,36 @@ function inSection(
 	return outcome.start < range.end && outcome.end > range.start;
 }
 
+// The [start, end) span, in the note body, of the table cell this element
+// renders — or null when it cannot be pinned down with certainty.
+//
+// Obsidian renders each unfocused Live Preview table cell through this same
+// post-processor, but a cell is not a top-level block so it gets no section
+// info: there is nothing to say where in the note it came from. The rendered
+// table's own structure supplies that. Match its grid back to a table parsed
+// from the body, then read off this cell's row and column.
+//
+// Everything here returns null rather than guessing. Without a definite span
+// the caller falls back to skipping the element, which is the safe outcome —
+// matching the note's whole annotation set against one cell's few words is how
+// unrelated annotations end up drawn inside a table.
+export function cellBodyRange(el: HTMLElement, body: string): TextRange | null {
+	// Queried per tag rather than as a 'td, th' selector list, which infers only
+	// as the base Element type.
+	const cell = el.closest('td') ?? el.closest('th');
+	const row = cell?.closest('tr') ?? null;
+	const table = cell?.closest('table') ?? null;
+	if (!cell || !row || !table) return null;
+	if (typeof cell.cellIndex !== 'number' || typeof row.rowIndex !== 'number') return null;
+
+	const rendered = Array.from(table.rows).map((r) =>
+		Array.from(r.cells).map((c) => (c.textContent ?? '').trim()),
+	);
+	const grid = matchTableGrid(tableGrids(body), rendered);
+	const match = grid?.rows[row.rowIndex]?.[cell.cellIndex];
+	return match ? { start: match.start, end: match.end } : null;
+}
+
 export function createReadingPostProcessor(host: ReadingHost) {
 	return async (el: HTMLElement, ctx: MarkdownPostProcessorContext): Promise<void> => {
 		const state = await host.ensureFileState(ctx.sourcePath);
@@ -256,24 +314,22 @@ export function createReadingPostProcessor(host: ReadingHost) {
 
 		const section = ctx.getSectionInfo(el);
 		const range = section ? sectionRange(section) : null;
-		if (range) {
+		// A Live Preview table cell renders through this post-processor but is
+		// not a top-level block, so it gets no section info. Its span in the note
+		// comes from the table's structure instead; only annotations resolved
+		// inside that one cell may be drawn here. Without a definite span there
+		// is nothing safe to draw — matching the note's whole annotation set
+		// against a few words of cell text is how unrelated annotations end up
+		// stacked in a table.
+		const cellRange = range ? null : cellBodyRange(el, state.body);
+		const scope = range ?? cellRange;
+		if (scope) {
 			candidates = candidates.filter((a) => {
 				const outcome = state.outcomes.get(a.id);
-				return outcome?.status === 'matched' && inSection(outcome, range);
+				return outcome?.status === 'matched' && inSection(outcome, scope);
 			});
 			if (candidates.length === 0) return;
 		} else if (el.closest('td, th')) {
-			// Obsidian renders a Live Preview table cell that is not currently
-			// being edited through this same post-processor pipeline (CodeMirror
-			// only takes over a cell once it is focused) — see
-			// https://forum.obsidian.md/t/bug-adding-decorations-inside-tables-no-longer-works/75160.
-			// Such a cell gets no section info, since it is not a real top-level
-			// block. Falling through to "no range means try every annotation" is
-			// exactly wrong here: it matches every annotation in the note against
-			// one cell's few words of text, and the coincidental hits all render
-			// stacked inside that cell. Skip rather than guess — genuine Reading
-			// View table rendering is unaffected, since it gets real section info
-			// and is handled by the branch above.
 			return;
 		}
 
@@ -289,6 +345,20 @@ export function createReadingPostProcessor(host: ReadingHost) {
 				? settings.gutterCommentsEnabled
 				: settings.gutterAnnotationsEnabled;
 
+		// Inside a table cell the selector's stored context is the raw row —
+		// pipes, padding and all — which appears nowhere in the cell's rendered
+		// text, so the matcher has little to anchor a point comment to. The
+		// cell's exact span is already known, though, so when its source text
+		// survives rendering unchanged (no inline markdown) the offset can be
+		// used directly. Otherwise `at` stays null and the matcher decides, as
+		// everywhere else.
+		const cellText = cellRange ? state.body.slice(cellRange.start, cellRange.end) : null;
+		const exactCell = cellRange !== null && cellText === child.renderedText();
+		const offsetIn = (outcome: { start: number; end: number }): TextRange | null =>
+			exactCell && cellRange
+				? { start: outcome.start - cellRange.start, end: outcome.end - cellRange.start }
+				: null;
+
 		for (const annotation of candidates) {
 			const outcome = state.outcomes.get(annotation.id);
 			if (outcome?.status !== 'matched') continue;
@@ -296,11 +366,12 @@ export function createReadingPostProcessor(host: ReadingHost) {
 			// and context reflect the current text, then match that against
 			// this block's rendered text.
 			const selector = captureSelector(state.body, outcome.start, outcome.end);
+			const at = offsetIn(outcome);
 			if (outcome.start === outcome.end) {
 				// Point comment marker.
 				if (annotation.type !== 'comment') continue;
 				if (settings.commentsHiddenEnabled) {
-					if (gutterWants(annotation)) child.tryAnchor(selector, annotation.id);
+					if (gutterWants(annotation)) child.tryAnchor(selector, annotation.id, at);
 					continue;
 				}
 				const styled = settings.commentsFormattingEnabled;
@@ -312,6 +383,7 @@ export function createReadingPostProcessor(host: ReadingHost) {
 					annotation.id,
 					number !== undefined ? String(number) : '',
 					() => host.revealAnnotation(ctx.sourcePath, annotation.id),
+					at,
 				);
 				continue;
 			}
@@ -330,6 +402,7 @@ export function createReadingPostProcessor(host: ReadingHost) {
 					{},
 					annotation.id,
 					() => host.revealAnnotation(ctx.sourcePath, annotation.id),
+					at,
 				);
 				continue;
 			}
@@ -339,6 +412,7 @@ export function createReadingPostProcessor(host: ReadingHost) {
 				highlightStyleVars(annotation.type, annotation.format, settings),
 				annotation.id,
 				() => host.revealAnnotation(ctx.sourcePath, annotation.id),
+				at,
 			);
 		}
 		if (child.spanCount > 0) ctx.addChild(child);

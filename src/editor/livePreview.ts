@@ -203,12 +203,17 @@ export function applyEditorDecorations(
 	settings: MdAnnotationSettings,
 	onMarkerClick: (annotationId: string) => void,
 ): void {
+	// Only Live Preview swaps a table for a block widget; in Source mode the
+	// table is ordinary text and decorates like anything else.
+	const livePreview =
+		view.dom.closest('.markdown-source-view')?.classList.contains('is-live-preview') ?? false;
 	const ranges = selectDecorationRanges(
 		view.state.doc.length,
 		body,
 		annotations,
 		outcomes,
 		settings,
+		livePreview,
 	);
 
 	const commentNumbers = numberComments(annotations, outcomes);

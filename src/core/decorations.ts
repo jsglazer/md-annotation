@@ -18,14 +18,19 @@ export interface DecorationRange {
 	annotation: Annotation;
 }
 
+// `skipTables` is set only for Live Preview, where Obsidian replaces a table
+// with its own block widget and a decoration inside it is never displayed.
+// Source mode renders the table as ordinary text, so its annotations decorate
+// normally and must not be dropped.
 export function selectDecorationRanges(
 	docLength: number,
 	body: string,
 	annotations: ReadonlyArray<Annotation>,
 	outcomes: ReadonlyMap<string, MatchResult>,
 	settings: MdAnnotationSettings,
+	skipTables: boolean,
 ): DecorationRange[] {
-	const tables = tableRanges(body);
+	const tables = skipTables ? tableRanges(body) : [];
 	const ranges: DecorationRange[] = [];
 	for (const annotation of annotations) {
 		const outcome = outcomes.get(annotation.id);
@@ -41,12 +46,10 @@ export function selectDecorationRanges(
 		// hands us exactly that situation for a focused Live Preview table cell,
 		// whose editor holds only that one cell's text.
 		if (from === to && outcome.start !== outcome.end) continue;
-		// A range inside a table is skipped (see tables.ts): Obsidian renders a
-		// table as its own block widget, and CodeMirror decorations placed
-		// inside one are not displayed in Live Preview regardless — see
-		// https://forum.obsidian.md/t/bug-adding-decorations-inside-tables-no-longer-works/75160.
-		// Such an annotation still exists and is fully editable from the
-		// sidebar; it simply draws nothing in the editor.
+		// In Live Preview the table is a block widget, so a decoration inside it
+		// would never be displayed; the markdown post-processor draws those
+		// annotations instead (see editor/readingView.ts). The annotation is
+		// unaffected either way — it stays editable from the sidebar.
 		if (overlapsAny(tables, from, to)) continue;
 		if (from === to) {
 			// Point comment marker.

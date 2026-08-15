@@ -1340,7 +1340,35 @@ function looksLikeTableRow(line) {
 function isDelimiterRow(line) {
   return line.includes("-") && DELIMITER_ROW.test(line);
 }
-function tableRanges(text) {
+function splitRow(line, lineStart) {
+  var _a;
+  const cells = [];
+  const push = (from, to) => {
+    const raw = line.slice(from, to);
+    const lead = raw.length - raw.trimStart().length;
+    const text = raw.trim();
+    cells.push({ text, start: lineStart + from + lead, end: lineStart + from + lead + text.length });
+  };
+  let segStart = 0;
+  let i = 0;
+  while (i < line.length) {
+    if (line[i] === "\\") {
+      i += 2;
+      continue;
+    }
+    if (line[i] === "|") {
+      push(segStart, i);
+      segStart = i + 1;
+    }
+    i++;
+  }
+  push(segStart, line.length);
+  if (cells.length > 0 && ((_a = cells[0]) == null ? void 0 : _a.text) === "" && line.trimStart().startsWith("|")) cells.shift();
+  const last = cells[cells.length - 1];
+  if (cells.length > 0 && (last == null ? void 0 : last.text) === "" && line.trimEnd().endsWith("|")) cells.pop();
+  return cells;
+}
+function tableGrids(text) {
   var _a, _b, _c;
   const lines = text.split("\n");
   const lineStarts = [];
@@ -1349,38 +1377,65 @@ function tableRanges(text) {
     lineStarts.push(offset);
     offset += line.length + 1;
   }
-  const ranges = [];
+  const grids = [];
   let i = 0;
   while (i < lines.length) {
     const header = lines[i];
     const delimiter = lines[i + 1];
     if (header !== void 0 && delimiter !== void 0 && looksLikeTableRow(header) && isDelimiterRow(delimiter)) {
+      const rowLines = [i];
       let endLine = i + 1;
       let j = i + 2;
       while (j < lines.length) {
         const row = lines[j];
         if (row === void 0 || row.trim() === "" || !looksLikeTableRow(row)) break;
+        rowLines.push(j);
         endLine = j;
         j++;
       }
-      const start = (_a = lineStarts[i]) != null ? _a : 0;
-      const lastLine = (_b = lines[endLine]) != null ? _b : "";
-      const end = ((_c = lineStarts[endLine]) != null ? _c : 0) + lastLine.length;
-      ranges.push({ start, end });
+      grids.push({
+        start: (_a = lineStarts[i]) != null ? _a : 0,
+        end: ((_b = lineStarts[endLine]) != null ? _b : 0) + ((_c = lines[endLine]) != null ? _c : "").length,
+        rows: rowLines.map((ln) => {
+          var _a2, _b2;
+          return splitRow((_a2 = lines[ln]) != null ? _a2 : "", (_b2 = lineStarts[ln]) != null ? _b2 : 0);
+        })
+      });
       i = j;
       continue;
     }
     i++;
   }
-  return ranges;
+  return grids;
+}
+function tableRanges(text) {
+  return tableGrids(text).map((grid) => ({ start: grid.start, end: grid.end }));
 }
 function overlapsAny(ranges, from, to) {
   return ranges.some((r) => from < r.end && to > r.start);
 }
+function matchTableGrid(grids, rendered) {
+  var _a, _b;
+  const sameShape = grids.filter(
+    (g) => g.rows.length === rendered.length && g.rows.every((row, r) => {
+      var _a2, _b2;
+      return row.length === ((_b2 = (_a2 = rendered[r]) == null ? void 0 : _a2.length) != null ? _b2 : -1);
+    })
+  );
+  if (sameShape.length === 1) return (_a = sameShape[0]) != null ? _a : null;
+  if (sameShape.length === 0) return null;
+  const sameText = sameShape.filter(
+    (g) => g.rows.every((row, r) => row.every((cell, c) => {
+      var _a2;
+      return cell.text === ((_a2 = rendered[r]) == null ? void 0 : _a2[c]);
+    }))
+  );
+  return sameText.length === 1 ? (_b = sameText[0]) != null ? _b : null : null;
+}
 
 // src/core/decorations.ts
-function selectDecorationRanges(docLength, body, annotations, outcomes, settings) {
-  const tables = tableRanges(body);
+function selectDecorationRanges(docLength, body, annotations, outcomes, settings, skipTables) {
+  const tables = skipTables ? tableRanges(body) : [];
   const ranges = [];
   for (const annotation of annotations) {
     const outcome = outcomes.get(annotation.id);
@@ -1500,12 +1555,15 @@ var CommentMarkerWidget = class extends import_view.WidgetType {
   }
 };
 function applyEditorDecorations(view, body, annotations, outcomes, settings, onMarkerClick) {
+  var _a, _b;
+  const livePreview = (_b = (_a = view.dom.closest(".markdown-source-view")) == null ? void 0 : _a.classList.contains("is-live-preview")) != null ? _b : false;
   const ranges = selectDecorationRanges(
     view.state.doc.length,
     body,
     annotations,
     outcomes,
-    settings
+    settings,
+    livePreview
   );
   const commentNumbers = numberComments(annotations, outcomes);
   const builder = new import_state.RangeSetBuilder();
@@ -1784,37 +1842,55 @@ var HighlightRenderChild = class extends import_obsidian2.MarkdownRenderChild {
   get spanCount() {
     return this.spans.length + this.markers.length;
   }
+  // The flat text this element renders — what a caller compares against the
+  // markdown source to decide whether an exact offset can be used.
+  renderedText() {
+    return collectTextSlices(this.containerEl).text;
+  }
+  // Where an annotation goes within the rendered text. `at` is an already
+  // known offset pair (used for a table cell, whose exact position in the
+  // note is established structurally rather than by matching); without it the
+  // staged matcher resolves the selector, which is what absorbs the
+  // difference between markdown source and rendered text.
+  locate(text, selector, at) {
+    if (at) {
+      if (at.start < 0 || at.end > text.length || at.start > at.end) return null;
+      return { start: at.start, end: at.end };
+    }
+    const result = resolveSelector(text, selector);
+    return result.status === "matched" ? { start: result.start, end: result.end } : null;
+  }
   // Resolve `selector` against this element's rendered text and wrap the
   // match. The rendered text differs from the markdown source (syntax is
   // stripped), which is exactly what the staged matcher tolerates.
-  tryWrap(selector, classes, styleVars, annotationId, onClick) {
+  tryWrap(selector, classes, styleVars, annotationId, onClick, at = null) {
     const { text, slices } = collectTextSlices(this.containerEl);
     if (text === "") return;
-    const result = resolveSelector(text, selector);
-    if (result.status !== "matched") return;
-    this.wrapRange(slices, result.start, result.end, classes, styleVars, annotationId, onClick);
+    const found = this.locate(text, selector, at);
+    if (!found) return;
+    this.wrapRange(slices, found.start, found.end, classes, styleVars, annotationId, onClick);
   }
   // Insert an invisible, zero-width element at a point selector's position.
   // Used when the marker itself is deliberately not drawn but the Reading-view
   // gutter still needs somewhere to align that comment's card to.
-  tryAnchor(selector, annotationId) {
+  tryAnchor(selector, annotationId, at = null) {
     const { text, slices } = collectTextSlices(this.containerEl);
     if (text === "") return;
-    const result = resolveSelector(text, selector);
-    if (result.status !== "matched") return;
+    const found = this.locate(text, selector, at);
+    if (!found) return;
     const span = this.containerEl.ownerDocument.createElement("span");
     span.className = ANCHOR_CLASS;
     span.setAttribute("data-mdann-id", annotationId);
-    if (this.insertAt(slices, result.start, span)) this.markers.push(span);
+    if (this.insertAt(slices, found.start, span)) this.markers.push(span);
   }
   // Resolve a point selector (empty quote) against the rendered text and
   // insert a marker icon at the matched position.
-  tryMarker(selector, classes, styleVars, annotationId, label, onClick) {
+  tryMarker(selector, classes, styleVars, annotationId, label, onClick, at = null) {
     const { text, slices } = collectTextSlices(this.containerEl);
     if (text === "") return;
-    const result = resolveSelector(text, selector);
-    if (result.status !== "matched") return;
-    const pos = result.start;
+    const found = this.locate(text, selector, at);
+    if (!found) return;
+    const pos = found.start;
     const doc = this.containerEl.ownerDocument;
     const span = doc.createElement("span");
     span.className = classes;
@@ -1899,6 +1975,23 @@ function inSection(outcome, range) {
   }
   return outcome.start < range.end && outcome.end > range.start;
 }
+function cellBodyRange(el, body) {
+  var _a, _b, _c, _d;
+  const cell = (_a = el.closest("td")) != null ? _a : el.closest("th");
+  const row = (_b = cell == null ? void 0 : cell.closest("tr")) != null ? _b : null;
+  const table = (_c = cell == null ? void 0 : cell.closest("table")) != null ? _c : null;
+  if (!cell || !row || !table) return null;
+  if (typeof cell.cellIndex !== "number" || typeof row.rowIndex !== "number") return null;
+  const rendered = Array.from(table.rows).map(
+    (r) => Array.from(r.cells).map((c) => {
+      var _a2;
+      return ((_a2 = c.textContent) != null ? _a2 : "").trim();
+    })
+  );
+  const grid = matchTableGrid(tableGrids(body), rendered);
+  const match = (_d = grid == null ? void 0 : grid.rows[row.rowIndex]) == null ? void 0 : _d[cell.cellIndex];
+  return match ? { start: match.start, end: match.end } : null;
+}
 function createReadingPostProcessor(host) {
   return async (el, ctx) => {
     const state = await host.ensureFileState(ctx.sourcePath);
@@ -1912,10 +2005,12 @@ function createReadingPostProcessor(host) {
     if (candidates.length === 0) return;
     const section = ctx.getSectionInfo(el);
     const range = section ? sectionRange(section) : null;
-    if (range) {
+    const cellRange = range ? null : cellBodyRange(el, state.body);
+    const scope = range != null ? range : cellRange;
+    if (scope) {
       candidates = candidates.filter((a) => {
         const outcome = state.outcomes.get(a.id);
-        return (outcome == null ? void 0 : outcome.status) === "matched" && inSection(outcome, range);
+        return (outcome == null ? void 0 : outcome.status) === "matched" && inSection(outcome, scope);
       });
       if (candidates.length === 0) return;
     } else if (el.closest("td, th")) {
@@ -1925,14 +2020,18 @@ function createReadingPostProcessor(host) {
     const commentNumbers = numberComments(state.annotations, state.outcomes);
     const child = new HighlightRenderChild(el);
     const gutterWants = (annotation) => annotation.type === "comment" ? settings.gutterCommentsEnabled : settings.gutterAnnotationsEnabled;
+    const cellText = cellRange ? state.body.slice(cellRange.start, cellRange.end) : null;
+    const exactCell = cellRange !== null && cellText === child.renderedText();
+    const offsetIn = (outcome) => exactCell && cellRange ? { start: outcome.start - cellRange.start, end: outcome.end - cellRange.start } : null;
     for (const annotation of candidates) {
       const outcome = state.outcomes.get(annotation.id);
       if ((outcome == null ? void 0 : outcome.status) !== "matched") continue;
       const selector = captureSelector(state.body, outcome.start, outcome.end);
+      const at = offsetIn(outcome);
       if (outcome.start === outcome.end) {
         if (annotation.type !== "comment") continue;
         if (settings.commentsHiddenEnabled) {
-          if (gutterWants(annotation)) child.tryAnchor(selector, annotation.id);
+          if (gutterWants(annotation)) child.tryAnchor(selector, annotation.id, at);
           continue;
         }
         const styled2 = settings.commentsFormattingEnabled;
@@ -1943,7 +2042,8 @@ function createReadingPostProcessor(host) {
           styled2 ? highlightStyleVars(annotation.type, annotation.format, settings) : {},
           annotation.id,
           number !== void 0 ? String(number) : "",
-          () => host.revealAnnotation(ctx.sourcePath, annotation.id)
+          () => host.revealAnnotation(ctx.sourcePath, annotation.id),
+          at
         );
         continue;
       }
@@ -1955,7 +2055,8 @@ function createReadingPostProcessor(host) {
           `${HIGHLIGHT_CLASS} ${ANCHOR_CLASS}`,
           {},
           annotation.id,
-          () => host.revealAnnotation(ctx.sourcePath, annotation.id)
+          () => host.revealAnnotation(ctx.sourcePath, annotation.id),
+          at
         );
         continue;
       }
@@ -1964,7 +2065,8 @@ function createReadingPostProcessor(host) {
         `${highlightClasses(annotation.type, annotation.format, settings)} mdann-hl-clickable`,
         highlightStyleVars(annotation.type, annotation.format, settings),
         annotation.id,
-        () => host.revealAnnotation(ctx.sourcePath, annotation.id)
+        () => host.revealAnnotation(ctx.sourcePath, annotation.id),
+        at
       );
     }
     if (child.spanCount > 0) ctx.addChild(child);
