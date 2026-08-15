@@ -981,9 +981,12 @@ var CardLayers = class {
   }
   // Grow one note box to fit its text. This is the one place a write precedes
   // a read, so callers confine it to their measure phase; it is skipped when
-  // neither the text nor the available width has changed.
+  // neither the text, the available width, nor the font size has changed —
+  // the font size lives on card.root (font: inherit on the textarea), so it
+  // has to be part of the cache key too, or a size-only settings change
+  // leaves the box stuck at its old height.
   autoSize(card) {
-    const key = `${card.text.clientWidth} ${card.text.value}`;
+    const key = `${card.text.clientWidth} ${card.root.style.fontSize} ${card.text.value}`;
     if (card.sizedFor === key) return;
     card.text.setCssProps({ height: "0px" });
     card.text.setCssProps({ height: `${card.text.scrollHeight}px` });
@@ -1895,6 +1898,8 @@ function createReadingPostProcessor(host) {
         return (outcome == null ? void 0 : outcome.status) === "matched" && inSection(outcome, range);
       });
       if (candidates.length === 0) return;
+    } else if (el.closest("td, th")) {
+      return;
     }
     const settings = host.settings;
     const commentNumbers = numberComments(state.annotations, state.outcomes);

@@ -262,6 +262,19 @@ export function createReadingPostProcessor(host: ReadingHost) {
 				return outcome?.status === 'matched' && inSection(outcome, range);
 			});
 			if (candidates.length === 0) return;
+		} else if (el.closest('td, th')) {
+			// Obsidian renders a Live Preview table cell that is not currently
+			// being edited through this same post-processor pipeline (CodeMirror
+			// only takes over a cell once it is focused) — see
+			// https://forum.obsidian.md/t/bug-adding-decorations-inside-tables-no-longer-works/75160.
+			// Such a cell gets no section info, since it is not a real top-level
+			// block. Falling through to "no range means try every annotation" is
+			// exactly wrong here: it matches every annotation in the note against
+			// one cell's few words of text, and the coincidental hits all render
+			// stacked inside that cell. Skip rather than guess — genuine Reading
+			// View table rendering is unaffected, since it gets real section info
+			// and is handled by the branch above.
+			return;
 		}
 
 		const settings = host.settings;
