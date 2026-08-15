@@ -29,6 +29,7 @@ import {
 	applyEditorDecorations,
 	buildEditorExtension,
 	editorViewPath,
+	isEmbeddedEditorView,
 } from './editor/livePreview';
 import { ReadingGutter } from './editor/readingGutter';
 import { createReadingPostProcessor, sweepHighlightSpans } from './editor/readingView';
@@ -486,6 +487,19 @@ export default class MdAnnotationPlugin extends Plugin {
 	}
 
 	private resolveEditor(view: EditorView): void {
+		// The decisive check for Obsidian's nested table-cell editors. It is
+		// repeated here (the ViewPlugin already tries) because this runs from a
+		// timer, by which point the view's DOM is certainly attached and the
+		// nesting is visible — whereas plugin construction can race that.
+		//
+		// Resolving from such a view would hand setStateFromDoc a single cell's
+		// text as if it were the whole note, wiping every annotation the file
+		// has. Undo the attachment rather than merely skipping, so no stale
+		// gutter is left mounted inside the cell.
+		if (isEmbeddedEditorView(view)) {
+			this.detachEditor(view);
+			return;
+		}
 		const path = editorViewPath(view);
 		if (path === null) return;
 		this.setStateFromDoc(path, view.state.doc.toString());

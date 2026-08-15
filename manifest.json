@@ -1,7 +1,7 @@
 {
 	"id": "md-annotation",
 	"name": "MD Annotation",
-	"version": "1.0.11",
+	"version": "1.0.12",
 	"minAppVersion": "1.7.2",
 	"description": "Delimiter-free annotations and comments: highlight any text without touching the note body, managed from a sidebar.",
 	"author": "Josh Glazer",

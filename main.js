@@ -1378,6 +1378,31 @@ function overlapsAny(ranges, from, to) {
   return ranges.some((r) => from < r.end && to > r.start);
 }
 
+// src/core/decorations.ts
+function selectDecorationRanges(docLength, body, annotations, outcomes, settings) {
+  const tables = tableRanges(body);
+  const ranges = [];
+  for (const annotation of annotations) {
+    const outcome = outcomes.get(annotation.id);
+    if (!outcome || outcome.status !== "matched") continue;
+    const from = Math.max(0, Math.min(outcome.start, docLength));
+    const to = Math.min(outcome.end, docLength);
+    if (from > to) continue;
+    if (from === to && outcome.start !== outcome.end) continue;
+    if (overlapsAny(tables, from, to)) continue;
+    if (from === to) {
+      if (annotation.type !== "comment" || settings.commentsHiddenEnabled) continue;
+      ranges.push({ from, to, annotation });
+      continue;
+    }
+    if (annotation.type === "highlight" && !settings.annotationFormattingEnabled) continue;
+    if (annotation.type === "comment" && !settings.commentsFormattingEnabled) continue;
+    ranges.push({ from, to, annotation });
+  }
+  ranges.sort((a, b) => a.from - b.from || a.to - b.to);
+  return ranges;
+}
+
 // src/editor/livePreview.ts
 var setAnnotationDecorations = import_state.StateEffect.define({
   map: (value, mapping) => value.map(mapping)
@@ -1394,15 +1419,22 @@ var annotationDecoField = import_state.StateField.define({
   provide: (field) => import_view.EditorView.decorations.from(field)
 });
 var EDITOR_RESOLVE_DEBOUNCE_MS = 250;
+function isEmbeddedEditorView(view) {
+  var _a;
+  return ((_a = view.dom.parentElement) == null ? void 0 : _a.closest(".cm-editor")) != null;
+}
 function buildEditorExtension(host) {
   const watcher = import_view.ViewPlugin.fromClass(
     class {
       constructor(view) {
         this.view = view;
+        this.embedded = isEmbeddedEditorView(view);
+        if (this.embedded) return;
         host.attachEditor(view);
         host.scheduleEditorResolve(view, 0);
       }
       update(update) {
+        if (this.embedded) return;
         if (update.docChanged) host.scheduleEditorResolve(update.view, EDITOR_RESOLVE_DEBOUNCE_MS);
         else if (update.selectionSet) host.onEditorSelectionChange(update.view);
         if (update.geometryChanged || update.viewportChanged) {
@@ -1410,6 +1442,7 @@ function buildEditorExtension(host) {
         }
       }
       destroy() {
+        if (this.embedded) return;
         host.detachEditor(this.view);
       }
     }
@@ -1467,26 +1500,13 @@ var CommentMarkerWidget = class extends import_view.WidgetType {
   }
 };
 function applyEditorDecorations(view, body, annotations, outcomes, settings, onMarkerClick) {
-  const docLength = view.state.doc.length;
-  const tables = tableRanges(body);
-  const ranges = [];
-  for (const annotation of annotations) {
-    const outcome = outcomes.get(annotation.id);
-    if (!outcome || outcome.status !== "matched") continue;
-    const from = Math.max(0, Math.min(outcome.start, docLength));
-    const to = Math.min(outcome.end, docLength);
-    if (from > to) continue;
-    if (overlapsAny(tables, from, to)) continue;
-    if (from === to) {
-      if (annotation.type !== "comment" || settings.commentsHiddenEnabled) continue;
-      ranges.push({ from, to, annotation });
-      continue;
-    }
-    if (annotation.type === "highlight" && !settings.annotationFormattingEnabled) continue;
-    if (annotation.type === "comment" && !settings.commentsFormattingEnabled) continue;
-    ranges.push({ from, to, annotation });
-  }
-  ranges.sort((a, b) => a.from - b.from || a.to - b.to);
+  const ranges = selectDecorationRanges(
+    view.state.doc.length,
+    body,
+    annotations,
+    outcomes,
+    settings
+  );
   const commentNumbers = numberComments(annotations, outcomes);
   const builder = new import_state.RangeSetBuilder();
   for (const r of ranges) {
@@ -3623,6 +3643,10 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
     );
   }
   resolveEditor(view) {
+    if (isEmbeddedEditorView(view)) {
+      this.detachEditor(view);
+      return;
+    }
     const path = editorViewPath(view);
     if (path === null) return;
     this.setStateFromDoc(path, view.state.doc.toString());

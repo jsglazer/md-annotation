@@ -14,6 +14,7 @@ import { Decoration, EditorView, ViewPlugin, WidgetType } from '@codemirror/view
 import type { DecorationSet } from '@codemirror/view';
 import { editorInfoField, setIcon } from 'obsidian';
 
+import { selectDecorationRanges } from '../core/decorations';
 import type { MatchResult } from '../core/matcher';
 import { numberComments } from '../core/ordering';
 import type { MdAnnotationSettings } from '../core/settings';
@@ -22,7 +23,6 @@ import {
 	highlightStyleText,
 	markerClasses,
 } from '../core/settings';
-import { overlapsAny, tableRanges } from '../core/tables';
 import type { Annotation } from '../core/types';
 
 // Replaces the current decoration set wholesale after a resolution pass.
@@ -61,10 +61,35 @@ export interface EditorHost {
 
 export const EDITOR_RESOLVE_DEBOUNCE_MS = 250;
 
+// True for an EditorView that is nested inside another one — Obsidian gives a
+// Live Preview table cell its own child CodeMirror instance the moment you
+// click into it, and registered editor extensions are installed into that
+// child as well as the note's real editor.
+//
+// Such a view must never be treated as the note: its document is ONLY that
+// cell's text. Resolving from it parses a document with no %%md-annotation
+// block, which replaces the whole file's cached state with an empty one —
+// blanking the sidebar and every gutter until an edit in the real editor
+// forces a genuine re-parse. (Its ranges also clamp to the cell's length,
+// collapsing every annotation into a point comment stacked at one spot.)
+//
+// view.dom IS the .cm-editor element, so the search starts at its parent.
+export function isEmbeddedEditorView(view: EditorView): boolean {
+	return view.dom.parentElement?.closest('.cm-editor') != null;
+}
+
 export function buildEditorExtension(host: EditorHost): Extension {
 	const watcher = ViewPlugin.fromClass(
 		class {
+			// Checked once here, but deliberately re-checked in the host's
+			// resolve pass: a view's DOM may not be attached to its parent yet
+			// while its plugins are being constructed, so this can read false
+			// for a cell editor that a later, post-timeout check will catch.
+			private readonly embedded: boolean;
+
 			constructor(private view: EditorView) {
+				this.embedded = isEmbeddedEditorView(view);
+				if (this.embedded) return;
 				host.attachEditor(view);
 				host.scheduleEditorResolve(view, 0);
 			}
@@ -76,6 +101,7 @@ export function buildEditorExtension(host: EditorHost): Extension {
 				viewportChanged: boolean;
 				view: EditorView;
 			}): void {
+				if (this.embedded) return;
 				if (update.docChanged) host.scheduleEditorResolve(update.view, EDITOR_RESOLVE_DEBOUNCE_MS);
 				else if (update.selectionSet) host.onEditorSelectionChange(update.view);
 				// Resolution is debounced, but the cards already on screen must
@@ -86,6 +112,7 @@ export function buildEditorExtension(host: EditorHost): Extension {
 			}
 
 			destroy(): void {
+				if (this.embedded) return;
 				host.detachEditor(this.view);
 			}
 		},
@@ -166,12 +193,8 @@ class CommentMarkerWidget extends WidgetType {
 //   - commentsFormattingEnabled off → range comments undecorated, markers plain
 //   - commentsHiddenEnabled on → no markers at all
 //
-// A range inside a table is skipped entirely (see core/tables.ts for why):
-// Obsidian renders the table as one block widget, and a mark/widget
-// decoration overlapping it crashes decoration rendering for the WHOLE
-// editor, not just that one annotation. Such an annotation still exists —
-// it is fully editable from the sidebar, and still renders in Reading view —
-// it just draws nothing in Live Preview/Source mode.
+// Which annotations qualify, and over what range, lives in
+// core/decorations.ts — including the table and clamping rules.
 export function applyEditorDecorations(
 	view: EditorView,
 	body: string,
@@ -180,27 +203,13 @@ export function applyEditorDecorations(
 	settings: MdAnnotationSettings,
 	onMarkerClick: (annotationId: string) => void,
 ): void {
-	const docLength = view.state.doc.length;
-	const tables = tableRanges(body);
-	const ranges: Array<{ from: number; to: number; annotation: Annotation }> = [];
-	for (const annotation of annotations) {
-		const outcome = outcomes.get(annotation.id);
-		if (!outcome || outcome.status !== 'matched') continue;
-		const from = Math.max(0, Math.min(outcome.start, docLength));
-		const to = Math.min(outcome.end, docLength);
-		if (from > to) continue;
-		if (overlapsAny(tables, from, to)) continue;
-		if (from === to) {
-			// Point comment marker.
-			if (annotation.type !== 'comment' || settings.commentsHiddenEnabled) continue;
-			ranges.push({ from, to, annotation });
-			continue;
-		}
-		if (annotation.type === 'highlight' && !settings.annotationFormattingEnabled) continue;
-		if (annotation.type === 'comment' && !settings.commentsFormattingEnabled) continue;
-		ranges.push({ from, to, annotation });
-	}
-	ranges.sort((a, b) => a.from - b.from || a.to - b.to);
+	const ranges = selectDecorationRanges(
+		view.state.doc.length,
+		body,
+		annotations,
+		outcomes,
+		settings,
+	);
 
 	const commentNumbers = numberComments(annotations, outcomes);
 	const builder = new RangeSetBuilder<Decoration>();
