@@ -20,6 +20,7 @@ MD Annotation is the delimiter-free successor to [Annotation Manager](https://gi
 
   Line-delimited JSON means a sync or Git merge conflict corrupts at most one line — every other annotation still loads, and the damaged line is preserved verbatim and flagged in the sidebar instead of being deleted.
 - **Rendering** — highlights are applied transiently: CodeMirror decorations in Live Preview / Source mode, wrapped spans in Reading View. Nothing is ever written into the body text.
+- **Tables** — Obsidian renders a table as its own block, so annotations inside one are drawn through the same path Reading View uses rather than as editor decorations. The plugin works out which cell it is looking at by matching the rendered table's shape back to the table in the note, then places the annotation at its exact offset within that cell. If a note contains two structurally identical tables there is no way to tell them apart, so it leaves those annotations undrawn rather than risk putting them in the wrong table — they stay intact and editable in the sidebar.
 - **Margin cards** — the optional gutter draws each note as a card in the margin, level with the line it belongs to. In the editor the positions come from CodeMirror's own geometry; in Reading View they are measured from the rendered spans. Both share the same card, so a note reads and edits identically wherever you are.
 - **Self-healing** — when an edit shifts a highlight and it re-resolves with high confidence, the refreshed selector is saved back automatically. Low-confidence or ambiguous matches are flagged as *orphaned* — the plugin never guesses.
 
@@ -32,9 +33,10 @@ The two are distinguished by whether text is selected when you run the single **
 
 ## Features
 
-- **Highlights** with unlimited custom formats — per-format Use toggle, font/background colors (each with its own enable checkbox) per light/dark theme, and an optional font size
+- **Highlights** with unlimited custom formats — per-format Use toggle, font/background colors (each with its own enable checkbox) per light/dark theme, and an optional font size for the highlighted text
 - **Point comments** — a **numbered** marker icon at any spot in the text, no selection needed; styled by the dedicated comment format or any annotation format
-- **Sidebar** listing every annotation of the active note: **click an entry to jump to it in the text**, edit comments, **reassign an annotation (or comment) to a different format** via a dropdown, open/close status, delete (with confirmation). Comment entries show their **line number in the top right** of the card.
+- **Sidebar** listing every annotation of the active note: **click an entry to jump to it in the text**, edit comments, and **reassign an annotation (or comment) to a different format** via a dropdown — with open/closed status (an outlined square, filled once closed) and delete sitting beside it as icon buttons. Comment entries show their **line number in the top right** of the card.
+- **Works inside tables** — highlights and comments anchor in table cells and render there in Live Preview, Source mode and Reading View, like anywhere else in the note
 - **Sidebar toolbar** — **search** across every note/comment box, a **format filter** built from the identifiers actually present in the open note (so you can show only your `Key` or `Define` entries), and **First / Last** buttons that scroll the list to either end. The toolbar is **pinned to the top** of the panel, so it stays reachable however far down the list you scroll.
 - **Margin gutter** — show notes as **editable cards in the margin**, level with the line they're anchored to and joined to it by a leader line. Annotations and comments switch on separately and can occupy **opposite margins**; the width is yours to set. Works in **Live Preview, Source mode _and_ Reading View**. Click a card to scroll the sidebar to the same entry. A gutter drops itself automatically while a pane is too narrow to spare the room.
 - **Two-way navigation** — click annotated text or a comment marker to jump to its sidebar entry (and focus its comment box); on open the sidebar scrolls to the entry nearest the cursor. Clicking into an entry's note box flashes that annotation in the text so you can see what you're writing about.
@@ -71,7 +73,7 @@ Settings are organized into **General / Annotations / Comments / Gutter** tabs:
 - **General** — the author name recorded on every annotation you create; three **navigation** toggles (all on by default); and **format export / import**
 - **Annotations** — a formatting visibility toggle, plus a per-format grid: Use checkbox, editable name, Fr/Bg colors for light and dark themes (each color has its own enable checkbox), font size, and a live sample-text example. Renaming a format here also updates every annotated note.
 - **Comments** — hide-markers and formatting toggles, plus the dedicated comment format's Fr/Bg colors per theme with a live example
-- **Gutter** — everything about the margin cards: show-toggles and left/right margin choice for annotations and for comments independently, the shared width, and the optional Note Toolbar button highlight (see below)
+- **Gutter** — everything about the margin cards: show-toggles and left/right margin choice for annotations and for comments independently, the shared width, a card font size per type, and the optional Note Toolbar button highlight (see below)
 
 ### The margin gutter
 
@@ -82,6 +84,7 @@ Notes can be shown as cards in the page margin instead of (or as well as) in the
 | **Show annotations / comments in the gutter** | Switch each type on separately (also toggled by its command) |
 | **Annotation / comment gutter side** | Which margin each type uses — they can sit in opposite margins |
 | **Gutter width** | Room each gutter takes from the note, 140–480 px |
+| **Annotation / comment card font size** | Text size inside the margin cards, set per type. Independent of a format's own Size, which styles the highlighted text and the sidebar — so the cards can be sized without touching either. Blank uses the theme default |
 | **Only on notes with annotations** | Reserve the margin per note instead of vault-wide — on by default |
 
 It works in Live Preview, Source mode and Reading View. Clicking a card scrolls the sidebar to the matching entry when the sidebar is already open. Orphaned annotations have no line to sit beside, so they stay in the sidebar where they can be re-anchored.
