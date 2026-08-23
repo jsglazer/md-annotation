@@ -106,7 +106,7 @@ export default class MdAnnotationPlugin extends Plugin {
 		this.registerMarkdownPostProcessor(createReadingPostProcessor(this));
 		this.registerView(SIDEBAR_VIEW_TYPE, (leaf) => new AnnotationSidebarView(leaf, this));
 		this.addSettingTab(new MdAnnotationSettingTab(this.app, this));
-		this.addRibbonIcon('highlighter', 'Open annotation sidebar', () => {
+		this.addRibbonIcon('highlighter', 'Toggle annotation sidebar', () => {
 			void this.activateSidebar();
 		});
 
@@ -122,7 +122,7 @@ export default class MdAnnotationPlugin extends Plugin {
 		});
 		this.addCommand({
 			id: 'open-sidebar',
-			name: 'Open annotation sidebar',
+			name: 'Toggle annotation sidebar',
 			icon: 'panel-right',
 			callback: () => {
 				void this.activateSidebar();
