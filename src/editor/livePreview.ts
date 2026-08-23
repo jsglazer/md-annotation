@@ -19,6 +19,7 @@ import type { MatchResult } from '../core/matcher';
 import { numberComments } from '../core/ordering';
 import type { MdAnnotationSettings } from '../core/settings';
 import {
+	WIDGET_HL_CLASS,
 	highlightClasses,
 	highlightStyleText,
 	markerClasses,
@@ -129,7 +130,139 @@ export function buildEditorExtension(host: EditorHost): Extension {
 			return false;
 		},
 	});
-	return [annotationDecoField, watcher, clickReveal];
+	// A mark decoration cannot reach content another extension has replaced
+	// with a widget, so highlighted Live Preview widgets are painted from the
+	// DOM instead (see paintWidgetHighlights). This hangs off docViewUpdate,
+	// not update(): plugin update() methods run BEFORE CodeMirror redraws the
+	// document, so they would see the previous set of widget elements.
+	// docViewUpdate fires after every redraw, including the viewport-driven
+	// ones that scrolling causes without any transaction.
+	const widgetPainter = ViewPlugin.fromClass(
+		class {
+			constructor(private view: EditorView) {}
+
+			docViewUpdate(view: EditorView): void {
+				if (isEmbeddedEditorView(view)) return;
+				paintWidgetHighlights(view);
+			}
+
+			// Belt and braces: docViewUpdate is a relatively recent addition to
+			// @codemirror/view, and the copy Obsidian bundles is not ours to
+			// pin. A measure-phase write runs after the redraw on every
+			// version, so the paint still happens if the hook above is never
+			// called. Repainting is idempotent, so doing both is only wasted
+			// work, never wrong.
+			update(update: { view: EditorView }): void {
+				const view = update.view;
+				if (isEmbeddedEditorView(view)) return;
+				view.requestMeasure({ read: () => null, write: () => paintWidgetHighlights(view) });
+			}
+
+			destroy(): void {
+				clearWidgetHighlights(this.view);
+			}
+		},
+	);
+	return [annotationDecoField, watcher, clickReveal, widgetPainter];
+}
+
+// ── Highlighting across Live Preview widgets ───────────────────────────────
+//
+// CodeMirror never applies a mark decoration to a range that another extension
+// has replaced with a widget: it closes the mark span before the widget and
+// reopens it after (verified against @codemirror/view 6.43.1 — true regardless
+// of `inclusive`, precedence, or whether both decorations come from one set).
+// In Live Preview that leaves everything Obsidian renders as an inline widget
+// unhighlighted — most visibly inline math, where `$x > 0$` highlights fine in
+// Source mode (ordinary text there) but not in Live Preview.
+//
+// So the widget element is painted directly. CodeMirror's DOMObserver ignores
+// mutations whose nearest tile is a widget (`readMutation` returns null for
+// them), so touching this DOM cannot feed back into the editor.
+
+// Properties set on a painted widget, removed again when it stops being
+// covered. Kept explicit so nothing else on the foreign element is disturbed.
+const WIDGET_STYLE_PROPS = [
+	'--mdann-light-fg',
+	'--mdann-light-bg',
+	'--mdann-dark-fg',
+	'--mdann-dark-bg',
+	'font-size',
+];
+
+// CodeMirror gives every non-editable widget contentEditable="false"; nothing
+// else inside a line carries it. Our own comment markers are widgets too, and
+// carry data-mdann-id — they style themselves and must not be repainted.
+function collectWidgetElements(root: Element, out: HTMLElement[]): void {
+	for (const child of Array.from(root.children)) {
+		const el = child as HTMLElement;
+		if (el.hasAttribute('data-mdann-id')) continue;
+		if (el.getAttribute('contenteditable') === 'false') {
+			out.push(el);
+			continue;
+		}
+		collectWidgetElements(el, out);
+	}
+}
+
+function unpaintWidget(el: HTMLElement): void {
+	el.removeClass(WIDGET_HL_CLASS);
+	el.removeAttribute('data-mdann-id');
+	for (const prop of WIDGET_STYLE_PROPS) el.style.removeProperty(prop);
+	if (el.getAttribute('style') === '') el.removeAttribute('style');
+}
+
+export function clearWidgetHighlights(view: EditorView): void {
+	for (const el of Array.from(
+		view.contentDOM.querySelectorAll<HTMLElement>('.' + WIDGET_HL_CLASS),
+	)) {
+		unpaintWidget(el);
+	}
+}
+
+function paintWidgetHighlights(view: EditorView): void {
+	clearWidgetHighlights(view);
+	const deco = view.state.field(annotationDecoField, false);
+	if (!deco) return;
+
+	// The mark decorations, read back from the field so they arrive already
+	// mapped through any edits since the last resolution pass.
+	const marks: Array<{ from: number; to: number; id: string; style: string }> = [];
+	const iter = deco.iter();
+	while (iter.value) {
+		const spec = iter.value.spec as { attributes?: Record<string, string> } | undefined;
+		const id = spec?.attributes?.['data-mdann-id'];
+		if (iter.to > iter.from && id !== undefined) {
+			marks.push({ from: iter.from, to: iter.to, id, style: spec?.attributes?.style ?? '' });
+		}
+		iter.next();
+	}
+	if (marks.length === 0) return;
+
+	const widgets: HTMLElement[] = [];
+	collectWidgetElements(view.contentDOM, widgets);
+	for (const el of widgets) {
+		let pos: number;
+		try {
+			pos = view.posAtDOM(el);
+		} catch {
+			// The element is no longer part of the rendered document.
+			continue;
+		}
+		const mark = marks.find((m) => pos >= m.from && pos < m.to);
+		if (!mark) continue;
+		el.addClass(WIDGET_HL_CLASS);
+		// Lets a click on the widget reveal its sidebar entry, exactly as a
+		// click on the surrounding highlighted text does.
+		el.setAttribute('data-mdann-id', mark.id);
+		for (const declaration of mark.style.split(';')) {
+			const colon = declaration.indexOf(':');
+			if (colon === -1) continue;
+			const prop = declaration.slice(0, colon).trim();
+			if (!WIDGET_STYLE_PROPS.includes(prop)) continue;
+			el.style.setProperty(prop, declaration.slice(colon + 1).trim());
+		}
+	}
 }
 
 // The file path an EditorView is showing, via Obsidian's public state field.

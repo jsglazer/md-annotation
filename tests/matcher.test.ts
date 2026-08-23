@@ -3,8 +3,10 @@ import {
 	AMBIGUITY_MARGIN,
 	CONTEXT_LENGTH,
 	HIGH_CONFIDENCE,
+	REPAIR_CONFIDENCE,
 	captureSelector,
 	diceSimilarity,
+	repairSelector,
 	resolveSelector,
 	resolveSelectors,
 } from '../src/core/matcher';
@@ -230,5 +232,58 @@ describe('resolveSelector — point selectors (comment markers)', () => {
 	it('orphans an empty selector with no context at all', () => {
 		const sel: TextQuoteSelector = { exact: '', prefix: '', suffix: '' };
 		expect(resolveSelector(DOC, sel)).toEqual({ status: 'orphaned', reason: 'not-found' });
+	});
+});
+
+describe('repairSelector', () => {
+	it('is a strictly lower bar than everyday resolution', () => {
+		expect(REPAIR_CONFIDENCE).toBeLessThan(HIGH_CONFIDENCE);
+	});
+
+	it('places an orphan whose sentence was rewritten from scratch', () => {
+		const sel = selectorFor(DOC, 'A second sentence provides more context for matching.');
+		const replacement = 'One more line offers extra background where required.';
+		const edited =
+			'The quick brown fox jumps over the lazy dog. ' +
+			replacement +
+			' The final sentence closes the paragraph with unique words.';
+		expect(resolveSelector(edited, sel)).toEqual({ status: 'orphaned', reason: 'not-found' });
+
+		const repaired = repairSelector(edited, sel);
+		expect(repaired.status).toBe('matched');
+		if (repaired.status === 'matched') {
+			expect(edited.slice(repaired.start, repaired.end)).toBe(replacement);
+			expect(repaired.confidence).toBeGreaterThanOrEqual(REPAIR_CONFIDENCE);
+			expect(repaired.confidence).toBeLessThan(HIGH_CONFIDENCE);
+		}
+	});
+
+	it('gives up when the whole neighbourhood is gone, not just the quote', () => {
+		const sel = selectorFor(DOC, 'A second sentence provides more context for matching.');
+		const edited =
+			'A totally different opening line here entirely. ' +
+			'One more line offers extra background where required. ' +
+			'Then something else closes it off with other wording.';
+		expect(repairSelector(edited, sel)).toEqual({ status: 'orphaned', reason: 'not-found' });
+	});
+
+	it('still refuses to choose between two equally good sites', () => {
+		const doc = 'alpha beta gamma delta. alpha beta gamma delta.';
+		const sel: TextQuoteSelector = { exact: 'beta gamma', prefix: 'alpha ', suffix: ' delta.' };
+		expect(repairSelector(doc, sel)).toEqual({ status: 'orphaned', reason: 'ambiguous' });
+	});
+
+	it('leaves an orphan orphaned when the text is simply gone', () => {
+		const sel: TextQuoteSelector = {
+			exact: 'nothing here resembles this at all',
+			prefix: 'nor does this context',
+			suffix: 'nor this one either',
+		};
+		expect(repairSelector(DOC, sel)).toEqual({ status: 'orphaned', reason: 'not-found' });
+	});
+
+	it('does not change what everyday resolution accepts', () => {
+		const sel = selectorFor(DOC, 'lazy dog');
+		expect(resolveSelector(DOC, sel)).toMatchObject({ status: 'matched', confidence: 1 });
 	});
 });

@@ -273,6 +273,7 @@ function createAnnotation(input) {
 // src/core/matcher.ts
 var CONTEXT_LENGTH = 32;
 var HIGH_CONFIDENCE = 0.75;
+var REPAIR_CONFIDENCE = 0.5;
 var AMBIGUITY_MARGIN = 0.05;
 var FUZZY_MIN_QUOTE_LENGTH = 8;
 var ANCHOR_KEY_LENGTH = 16;
@@ -333,7 +334,7 @@ function diceSimilarity(a, b) {
   }
   return 2 * overlap / (a.length - 1 + (b.length - 1));
 }
-function resolveExact(text, selector) {
+function resolveExact(text, selector, minConfidence) {
   const occurrences = indicesOf(text, selector.exact);
   if (occurrences.length === 0) return null;
   const scored = occurrences.map((start) => ({
@@ -359,7 +360,7 @@ function resolveExact(text, selector) {
     return { status: "orphaned", reason: "ambiguous" };
   }
   const confidence = 0.5 + 0.5 * best.ctx;
-  if (confidence < HIGH_CONFIDENCE) return { status: "orphaned", reason: "ambiguous" };
+  if (confidence < minConfidence) return { status: "orphaned", reason: "ambiguous" };
   return acceptWithRefresh(text, best.start, best.end, confidence, selector);
 }
 function contextAnchoredCandidates(text, selector) {
@@ -434,10 +435,10 @@ function sameSite(a, b) {
   const shorter = Math.min(a.end - a.start, b.end - b.start);
   return inter >= shorter / 2;
 }
-function pickCandidate(text, candidates, selector) {
+function pickCandidate(text, candidates, selector, minConfidence) {
   const sorted = [...candidates].sort((a, b) => b.score - a.score || a.start - b.start);
   const best = sorted[0];
-  if (!best || best.score < HIGH_CONFIDENCE) return null;
+  if (!best || best.score < minConfidence) return null;
   const rival = sorted.slice(1).find((c) => !sameSite(best, c));
   if (rival && best.score - rival.score < AMBIGUITY_MARGIN) {
     return { status: "orphaned", reason: "ambiguous" };
@@ -454,7 +455,7 @@ function acceptWithRefresh(text, start, end, confidence, selector) {
     refreshedSelector: selectorsEqual(captured, selector) ? null : captured
   };
 }
-function resolvePoint(text, selector) {
+function resolvePoint(text, selector, minConfidence) {
   const prefixKey = selector.prefix.slice(-ANCHOR_KEY_LENGTH);
   const suffixKey = selector.suffix.slice(0, ANCHOR_KEY_LENGTH);
   if (prefixKey === "" && suffixKey === "") return { status: "orphaned", reason: "not-found" };
@@ -463,22 +464,30 @@ function resolvePoint(text, selector) {
   for (const i of indicesOf(text, suffixKey)) positions.add(i);
   const scored = [...positions].map((pos) => ({ pos, score: contextScore(text, pos, pos, selector) })).sort((a, b) => b.score - a.score || a.pos - b.pos);
   const best = scored[0];
-  if (!best || best.score < HIGH_CONFIDENCE) return { status: "orphaned", reason: "not-found" };
+  if (!best || best.score < minConfidence) return { status: "orphaned", reason: "not-found" };
   const rival = scored.slice(1).find((c) => c.pos !== best.pos);
   if (rival && best.score - rival.score < AMBIGUITY_MARGIN) {
     return { status: "orphaned", reason: "ambiguous" };
   }
   return acceptWithRefresh(text, best.pos, best.pos, Math.min(best.score, 1), selector);
 }
-function resolveSelector(text, selector) {
-  if (selector.exact === "") return resolvePoint(text, selector);
-  const exactResult = resolveExact(text, selector);
+function resolveSelector(text, selector, minConfidence = HIGH_CONFIDENCE) {
+  if (selector.exact === "") return resolvePoint(text, selector, minConfidence);
+  const exactResult = resolveExact(text, selector, minConfidence);
   if (exactResult) return exactResult;
-  const anchored = pickCandidate(text, contextAnchoredCandidates(text, selector), selector);
+  const anchored = pickCandidate(
+    text,
+    contextAnchoredCandidates(text, selector),
+    selector,
+    minConfidence
+  );
   if (anchored) return anchored;
-  const fuzzy = pickCandidate(text, fuzzyScanCandidates(text, selector), selector);
+  const fuzzy = pickCandidate(text, fuzzyScanCandidates(text, selector), selector, minConfidence);
   if (fuzzy) return fuzzy;
   return { status: "orphaned", reason: "not-found" };
+}
+function repairSelector(text, selector) {
+  return resolveSelector(text, selector, REPAIR_CONFIDENCE);
 }
 function resolveSelectors(text, selectors) {
   const out = /* @__PURE__ */ new Map();
@@ -630,6 +639,7 @@ function defaultSettings() {
       partStyle("", "#c8e6c9"),
       partStyle("", "#2e5d33")
     ),
+    autoRepairOrphans: false,
     syncTextAndSidebar: true,
     sidebarClickJumpsToText: true,
     textClickJumpsToSidebar: true,
@@ -703,6 +713,7 @@ function normalizeSettings(raw) {
     "gutterAnnotationsEnabled",
     "gutterCommentsEnabled",
     "gutterOnlyWhenAnnotated",
+    "autoRepairOrphans",
     "syncTextAndSidebar",
     "sidebarClickJumpsToText",
     "textClickJumpsToSidebar"
@@ -833,6 +844,7 @@ var HIGHLIGHT_CLASS = "mdann-hl";
 var COMMENT_CLASS = "mdann-comment";
 var MARKER_CLASS = "mdann-marker";
 var ANCHOR_CLASS = "mdann-anchor";
+var WIDGET_HL_CLASS = "mdann-widget-hl";
 function formatClass(formatName) {
   return "mdann-f-" + formatName.replace(/[^a-zA-Z0-9_-]/g, "-");
 }
@@ -1512,7 +1524,101 @@ function buildEditorExtension(host) {
       return false;
     }
   });
-  return [annotationDecoField, watcher, clickReveal];
+  const widgetPainter = import_view.ViewPlugin.fromClass(
+    class {
+      constructor(view) {
+        this.view = view;
+      }
+      docViewUpdate(view) {
+        if (isEmbeddedEditorView(view)) return;
+        paintWidgetHighlights(view);
+      }
+      // Belt and braces: docViewUpdate is a relatively recent addition to
+      // @codemirror/view, and the copy Obsidian bundles is not ours to
+      // pin. A measure-phase write runs after the redraw on every
+      // version, so the paint still happens if the hook above is never
+      // called. Repainting is idempotent, so doing both is only wasted
+      // work, never wrong.
+      update(update) {
+        const view = update.view;
+        if (isEmbeddedEditorView(view)) return;
+        view.requestMeasure({ read: () => null, write: () => paintWidgetHighlights(view) });
+      }
+      destroy() {
+        clearWidgetHighlights(this.view);
+      }
+    }
+  );
+  return [annotationDecoField, watcher, clickReveal, widgetPainter];
+}
+var WIDGET_STYLE_PROPS = [
+  "--mdann-light-fg",
+  "--mdann-light-bg",
+  "--mdann-dark-fg",
+  "--mdann-dark-bg",
+  "font-size"
+];
+function collectWidgetElements(root, out) {
+  for (const child of Array.from(root.children)) {
+    const el = child;
+    if (el.hasAttribute("data-mdann-id")) continue;
+    if (el.getAttribute("contenteditable") === "false") {
+      out.push(el);
+      continue;
+    }
+    collectWidgetElements(el, out);
+  }
+}
+function unpaintWidget(el) {
+  el.removeClass(WIDGET_HL_CLASS);
+  el.removeAttribute("data-mdann-id");
+  for (const prop of WIDGET_STYLE_PROPS) el.style.removeProperty(prop);
+  if (el.getAttribute("style") === "") el.removeAttribute("style");
+}
+function clearWidgetHighlights(view) {
+  for (const el of Array.from(
+    view.contentDOM.querySelectorAll("." + WIDGET_HL_CLASS)
+  )) {
+    unpaintWidget(el);
+  }
+}
+function paintWidgetHighlights(view) {
+  var _a, _b, _c;
+  clearWidgetHighlights(view);
+  const deco = view.state.field(annotationDecoField, false);
+  if (!deco) return;
+  const marks = [];
+  const iter = deco.iter();
+  while (iter.value) {
+    const spec = iter.value.spec;
+    const id = (_a = spec == null ? void 0 : spec.attributes) == null ? void 0 : _a["data-mdann-id"];
+    if (iter.to > iter.from && id !== void 0) {
+      marks.push({ from: iter.from, to: iter.to, id, style: (_c = (_b = spec == null ? void 0 : spec.attributes) == null ? void 0 : _b.style) != null ? _c : "" });
+    }
+    iter.next();
+  }
+  if (marks.length === 0) return;
+  const widgets = [];
+  collectWidgetElements(view.contentDOM, widgets);
+  for (const el of widgets) {
+    let pos;
+    try {
+      pos = view.posAtDOM(el);
+    } catch (e) {
+      continue;
+    }
+    const mark = marks.find((m) => pos >= m.from && pos < m.to);
+    if (!mark) continue;
+    el.addClass(WIDGET_HL_CLASS);
+    el.setAttribute("data-mdann-id", mark.id);
+    for (const declaration of mark.style.split(";")) {
+      const colon = declaration.indexOf(":");
+      if (colon === -1) continue;
+      const prop = declaration.slice(0, colon).trim();
+      if (!WIDGET_STYLE_PROPS.includes(prop)) continue;
+      el.style.setProperty(prop, declaration.slice(colon + 1).trim());
+    }
+  }
 }
 function editorViewPath(view) {
   var _a, _b, _c;
@@ -1801,21 +1907,50 @@ var ReadingGutter = class {
 
 // src/editor/readingView.ts
 var import_obsidian2 = require("obsidian");
+var ATOM_SELECTOR = ".math, mjx-container";
+var MATH_DELIMITERS = /\$|\\\(|\\\[/;
 function collectTextSlices(root) {
-  var _a;
-  const doc = root.ownerDocument;
-  const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   const slices = [];
   let text = "";
-  let node = walker.nextNode();
-  while (node) {
-    const value = (_a = node.nodeValue) != null ? _a : "";
-    slices.push({ node, start: text.length, end: text.length + value.length });
-    text += value;
-    node = walker.nextNode();
-  }
+  const visit = (node) => {
+    var _a, _b;
+    if (node.nodeType === Node.TEXT_NODE) {
+      const value = (_a = node.nodeValue) != null ? _a : "";
+      slices.push({
+        kind: "text",
+        node,
+        start: text.length,
+        end: text.length + value.length
+      });
+      text += value;
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    const el = node;
+    if (el.matches(ATOM_SELECTOR)) {
+      const value = ((_b = el.textContent) != null ? _b : "").replace(/\s+/g, " ").trim();
+      slices.push({ kind: "atom", el, start: text.length, end: text.length + value.length });
+      text += value;
+      return;
+    }
+    for (const child of Array.from(node.childNodes)) visit(child);
+  };
+  for (const child of Array.from(root.childNodes)) visit(child);
   return { text, slices };
 }
+function restoreAtom(el) {
+  el.removeClass(WIDGET_HL_CLASS);
+  el.removeAttribute("data-mdann-id");
+  for (const prop of ATOM_STYLE_PROPS) el.style.removeProperty(prop);
+  if (el.getAttribute("style") === "") el.removeAttribute("style");
+}
+var ATOM_STYLE_PROPS = [
+  "--mdann-light-fg",
+  "--mdann-light-bg",
+  "--mdann-dark-fg",
+  "--mdann-dark-bg",
+  "font-size"
+];
 function unwrapHighlightSpan(span) {
   const parent = span.parentNode;
   if (!parent) return;
@@ -1832,15 +1967,22 @@ function sweepHighlightSpans(root) {
   )) {
     marker.remove();
   }
+  for (const atom of Array.from(root.querySelectorAll(`.${WIDGET_HL_CLASS}`))) {
+    restoreAtom(atom);
+  }
 }
 var HighlightRenderChild = class extends import_obsidian2.MarkdownRenderChild {
   constructor() {
     super(...arguments);
     this.spans = [];
     this.markers = [];
+    // Elements we styled in place rather than wrapped (rendered maths). Their
+    // internals belong to MathJax, so teardown restores them instead of
+    // unwrapping them.
+    this.atoms = [];
   }
   get spanCount() {
-    return this.spans.length + this.markers.length;
+    return this.spans.length + this.markers.length + this.atoms.length;
   }
   // The flat text this element renders — what a caller compares against the
   // markdown source to decide whether an exact offset can be used.
@@ -1868,7 +2010,16 @@ var HighlightRenderChild = class extends import_obsidian2.MarkdownRenderChild {
     if (text === "") return;
     const found = this.locate(text, selector, at);
     if (!found) return;
-    this.wrapRange(slices, found.start, found.end, classes, styleVars, annotationId, onClick);
+    this.wrapRange(
+      slices,
+      found.start,
+      found.end,
+      classes,
+      styleVars,
+      annotationId,
+      onClick,
+      MATH_DELIMITERS.test(selector.exact)
+    );
   }
   // Insert an invisible, zero-width element at a point selector's position.
   // Used when the marker itself is deliberately not drawn but the Reading-view
@@ -1915,6 +2066,12 @@ var HighlightRenderChild = class extends import_obsidian2.MarkdownRenderChild {
   insertAt(slices, pos, el) {
     const slice = slices.find((s) => pos >= s.start && pos <= s.end);
     if (!slice) return false;
+    if (slice.kind === "atom") {
+      const parent2 = slice.el.parentNode;
+      if (!parent2) return false;
+      parent2.insertBefore(el, pos <= slice.start ? slice.el : slice.el.nextSibling);
+      return true;
+    }
     const local = pos - slice.start;
     const target = local > 0 && local < slice.node.length ? slice.node.splitText(local) : null;
     const anchor = target != null ? target : local === 0 ? slice.node : slice.node.nextSibling;
@@ -1923,12 +2080,17 @@ var HighlightRenderChild = class extends import_obsidian2.MarkdownRenderChild {
     parent.insertBefore(el, anchor);
     return true;
   }
-  wrapRange(slices, start, end, classes, styleVars, annotationId, onClick) {
+  wrapRange(slices, start, end, classes, styleVars, annotationId, onClick, absorbEdgeAtoms = false) {
     var _a;
     const doc = this.containerEl.ownerDocument;
     for (const slice of slices) {
       const from = Math.max(start, slice.start);
       const to = Math.min(end, slice.end);
+      if (slice.kind === "atom") {
+        const covered = slice.end > slice.start ? from < to : absorbEdgeAtoms ? slice.start >= start && slice.start <= end : slice.start > start && slice.start < end;
+        if (covered) this.paintAtom(slice.el, styleVars, annotationId, onClick);
+        continue;
+      }
       if (from >= to) continue;
       let target = slice.node;
       const localFrom = from - slice.start;
@@ -1945,11 +2107,24 @@ var HighlightRenderChild = class extends import_obsidian2.MarkdownRenderChild {
       this.spans.push(span);
     }
   }
+  // Style a rendered maths container in place. Deliberately not the ordinary
+  // highlight class: teardown unwraps `span.mdann-hl`, which would dismantle
+  // an element the plugin does not own.
+  paintAtom(el, styleVars, annotationId, onClick) {
+    if (el.hasClass(WIDGET_HL_CLASS)) return;
+    el.addClass(WIDGET_HL_CLASS);
+    el.setAttribute("data-mdann-id", annotationId);
+    el.setCssProps(styleVars);
+    el.addEventListener("click", () => onClick());
+    this.atoms.push(el);
+  }
   onunload() {
     for (const span of this.spans) unwrapHighlightSpan(span);
     this.spans = [];
     for (const marker of this.markers) marker.remove();
     this.markers = [];
+    for (const atom of this.atoms) restoreAtom(atom);
+    this.atoms = [];
   }
 };
 function sectionRange(info) {
@@ -2276,6 +2451,7 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
       })
     );
     this.renderNavigationSection(containerEl);
+    this.renderOrphanSection(containerEl);
     this.renderFormatTransferSection(containerEl);
   }
   // ── Gutter tab ───────────────────────────────────────────────────────────
@@ -2517,6 +2693,25 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
       () => this.plugin.settings.textClickJumpsToSidebar,
       (v) => {
         this.plugin.settings.textClickJumpsToSidebar = v;
+      }
+    );
+  }
+  // An annotation whose text was edited beyond recognition is orphaned rather
+  // than guessed at. The sidebar's "Fix orphans" button searches again at a
+  // lower bar; this makes that pass automatic.
+  renderOrphanSection(containerEl) {
+    new import_obsidian3.Setting(containerEl).setName("Orphaned annotations").setHeading();
+    containerEl.createEl("p", {
+      text: 'An annotation is orphaned when the text it was anchored to has changed too much to be recognised, or when two places in the note are equally good matches. Orphans are listed in their own section of the sidebar, where "Fix orphans" searches the note again at a lower confidence bar and re-anchors whatever it can place unambiguously. Anything still in doubt is left alone for you to re-anchor by hand.',
+      cls: "setting-item-description"
+    });
+    this.renderToggle(
+      containerEl,
+      "Fix orphans automatically",
+      "Run the same pass whenever a note is read, instead of waiting for the button. Off by default: a repair at the lower bar can move a highlight without you seeing it happen",
+      () => this.plugin.settings.autoRepairOrphans,
+      (v) => {
+        this.plugin.settings.autoRepairOrphans = v;
       }
     );
   }
@@ -3071,6 +3266,7 @@ var AnnotationSidebarView = class extends import_obsidian5.ItemView {
     }
     if (visibleOrphaned.length > 0) {
       this.sectionHeader(root, this.countLabel("Orphaned", visibleOrphaned.length, orphaned.length));
+      this.renderFixOrphans(root, file.path);
       for (const annotation of visibleOrphaned) {
         this.renderCard(
           root,
@@ -3211,6 +3407,23 @@ var AnnotationSidebarView = class extends import_obsidian5.ItemView {
   }
   sectionHeader(root, text) {
     root.createEl("div", { text, cls: "mdann-section" });
+  }
+  // Re-runs matching for the orphans in this note at a relaxed confidence
+  // bar, adopting each result that lands somewhere unambiguous. Whatever it
+  // cannot place with confidence stays orphaned for a manual re-anchor.
+  renderFixOrphans(root, path) {
+    const row = root.createDiv({ cls: "mdann-fix-orphans" });
+    const btn = row.createEl("button", { text: "Fix orphans" });
+    btn.setAttribute(
+      "aria-label",
+      "Search this note again for each orphaned annotation, at a lower confidence bar"
+    );
+    btn.addEventListener("click", () => {
+      const repaired = this.plugin.repairOrphansInNote(path);
+      new import_obsidian5.Notice(
+        repaired === 0 ? "MD Annotation: no orphan could be placed with confidence" : `MD Annotation: re-anchored ${repaired} orphan${repaired === 1 ? "" : "s"}`
+      );
+    });
   }
   renderCard(root, path, annotation, outcome, commentNumber, body) {
     const isOrphan = outcome === void 0 || outcome.status === "orphaned";
@@ -3684,6 +3897,9 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
         );
       }
     }
+    if (this.settings.autoRepairOrphans) {
+      this.repairOrphans(parsed.body, parsed.annotations, outcomes, path);
+    }
     const state = {
       body: parsed.body,
       annotations: parsed.annotations,
@@ -3953,6 +4169,42 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
       this.notifyChange();
     }
     return true;
+  }
+  // Re-resolve every orphaned annotation at the relaxed repair bar, and adopt
+  // each one that lands somewhere unambiguous. Mutates `annotations` and
+  // `outcomes` in place and queues the new selectors; returns how many were
+  // re-anchored. Ambiguous orphans are left alone — two plausible sites are
+  // never guessed between, at any confidence bar.
+  repairOrphans(body, annotations, outcomes, path) {
+    let repaired = 0;
+    for (const annotation of annotations) {
+      const outcome = outcomes.get(annotation.id);
+      if (outcome && outcome.status !== "orphaned") continue;
+      const result = repairSelector(body, annotation.selector);
+      if (result.status !== "matched") continue;
+      const selector = captureSelector(body, result.start, result.end);
+      const dateModified = formatTimestamp(Date.now());
+      annotation.selector = selector;
+      annotation.dateModified = dateModified;
+      outcomes.set(annotation.id, { ...result, refreshedSelector: null });
+      this.queue.request(
+        path,
+        (text) => updateAnnotation(text, annotation.id, { selector, dateModified })
+      );
+      repaired++;
+    }
+    return repaired;
+  }
+  // Sidebar "Fix orphans" button: the same pass, on the note already parsed.
+  repairOrphansInNote(path) {
+    const state = this.states.get(path);
+    if (!state) return 0;
+    const repaired = this.repairOrphans(state.body, state.annotations, state.outcomes, path);
+    if (repaired > 0) {
+      this.decorateAllFor(path);
+      this.notifyChange();
+    }
+    return repaired;
   }
   reanchorFromSelection(path, id) {
     var _a;

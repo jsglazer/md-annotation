@@ -743,3 +743,32 @@ body.theme-dark .mdann-gutter-leader {
 	font-size: 0.85em;
 	margin: 6px 0 0;
 }
+
+/* ── Highlighting across elements the plugin does not own ─────────────── */
+
+/* Live Preview widgets and rendered maths cannot be covered by a mark
+   decoration or a wrap span (see editor/livePreview.ts and
+   editor/readingView.ts), so the element itself carries the format's colours.
+   Same custom properties as .mdann-hl; a separate class so the Reading-view
+   teardown that unwraps span.mdann-hl never touches these. */
+.mdann-widget-hl {
+	border-radius: 2px;
+	color: var(--mdann-light-fg, inherit);
+	background-color: var(--mdann-light-bg, transparent);
+}
+
+body.theme-dark .mdann-widget-hl {
+	color: var(--mdann-dark-fg, inherit);
+	background-color: var(--mdann-dark-bg, transparent);
+}
+
+/* "Fix orphans" action, directly under the Orphaned section header */
+.mdann-fix-orphans {
+	display: flex;
+	justify-content: flex-end;
+	padding: 0 0 var(--size-4-2);
+}
+
+.mdann-fix-orphans button {
+	font-size: var(--font-ui-smaller);
+}

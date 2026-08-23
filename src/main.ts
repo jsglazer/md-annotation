@@ -18,7 +18,8 @@ import {
 	updateAnnotation,
 	upsertAnnotation,
 } from './core/block';
-import { captureSelector, resolveSelectors } from './core/matcher';
+import type { MatchResult } from './core/matcher';
+import { captureSelector, repairSelector, resolveSelectors } from './core/matcher';
 import { nearestAnnotationId } from './core/ordering';
 import { WriteQueue } from './core/queue';
 import type { MdAnnotationSettings } from './core/settings';
@@ -419,6 +420,13 @@ export default class MdAnnotationPlugin extends Plugin {
 			}
 		}
 
+		// Opt-in orphan repair, running the same relaxed pass the sidebar's
+		// "Fix orphans" button runs. Off by default: an orphan you can see and
+		// fix beats a highlight that moved without being asked to.
+		if (this.settings.autoRepairOrphans) {
+			this.repairOrphans(parsed.body, parsed.annotations, outcomes, path);
+		}
+
 		const state: FileAnnotationState = {
 			body: parsed.body,
 			annotations: parsed.annotations,
@@ -728,6 +736,50 @@ export default class MdAnnotationPlugin extends Plugin {
 			this.notifyChange();
 		}
 		return true;
+	}
+
+	// Re-resolve every orphaned annotation at the relaxed repair bar, and adopt
+	// each one that lands somewhere unambiguous. Mutates `annotations` and
+	// `outcomes` in place and queues the new selectors; returns how many were
+	// re-anchored. Ambiguous orphans are left alone — two plausible sites are
+	// never guessed between, at any confidence bar.
+	private repairOrphans(
+		body: string,
+		annotations: ReadonlyArray<Annotation>,
+		outcomes: Map<string, MatchResult>,
+		path: string,
+	): number {
+		let repaired = 0;
+		for (const annotation of annotations) {
+			const outcome = outcomes.get(annotation.id);
+			if (outcome && outcome.status !== 'orphaned') continue;
+			const result = repairSelector(body, annotation.selector);
+			if (result.status !== 'matched') continue;
+			// Re-capture from where it actually landed, so the annotation is
+			// anchored to today's text rather than to the drifted original.
+			const selector = captureSelector(body, result.start, result.end);
+			const dateModified = formatTimestamp(Date.now());
+			annotation.selector = selector;
+			annotation.dateModified = dateModified;
+			outcomes.set(annotation.id, { ...result, refreshedSelector: null });
+			this.queue.request(path, (text) =>
+				updateAnnotation(text, annotation.id, { selector, dateModified }),
+			);
+			repaired++;
+		}
+		return repaired;
+	}
+
+	// Sidebar "Fix orphans" button: the same pass, on the note already parsed.
+	repairOrphansInNote(path: string): number {
+		const state = this.states.get(path);
+		if (!state) return 0;
+		const repaired = this.repairOrphans(state.body, state.annotations, state.outcomes, path);
+		if (repaired > 0) {
+			this.decorateAllFor(path);
+			this.notifyChange();
+		}
+		return repaired;
 	}
 
 	reanchorFromSelection(path: string, id: string): void {

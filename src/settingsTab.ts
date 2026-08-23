@@ -155,6 +155,7 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 			);
 
 		this.renderNavigationSection(containerEl);
+		this.renderOrphanSection(containerEl);
 		this.renderFormatTransferSection(containerEl);
 	}
 
@@ -476,6 +477,33 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 			() => this.plugin.settings.textClickJumpsToSidebar,
 			(v) => {
 				this.plugin.settings.textClickJumpsToSidebar = v;
+			},
+		);
+	}
+
+	// An annotation whose text was edited beyond recognition is orphaned rather
+	// than guessed at. The sidebar's "Fix orphans" button searches again at a
+	// lower bar; this makes that pass automatic.
+	private renderOrphanSection(containerEl: HTMLElement): void {
+		new Setting(containerEl).setName('Orphaned annotations').setHeading();
+		containerEl.createEl('p', {
+			text:
+				'An annotation is orphaned when the text it was anchored to has changed too ' +
+				'much to be recognised, or when two places in the note are equally good ' +
+				'matches. Orphans are listed in their own section of the sidebar, where ' +
+				'"Fix orphans" searches the note again at a lower confidence bar and re-anchors ' +
+				'whatever it can place unambiguously. Anything still in doubt is left alone for ' +
+				'you to re-anchor by hand.',
+			cls: 'setting-item-description',
+		});
+
+		this.renderToggle(
+			containerEl,
+			'Fix orphans automatically',
+			'Run the same pass whenever a note is read, instead of waiting for the button. Off by default: a repair at the lower bar can move a highlight without you seeing it happen',
+			() => this.plugin.settings.autoRepairOrphans,
+			(v) => {
+				this.plugin.settings.autoRepairOrphans = v;
 			},
 		);
 	}

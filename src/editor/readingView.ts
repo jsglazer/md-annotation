@@ -22,6 +22,7 @@ import {
 	ANCHOR_CLASS,
 	HIGHLIGHT_CLASS,
 	MARKER_CLASS,
+	WIDGET_HL_CLASS,
 	highlightClasses,
 	highlightStyleVars,
 	markerClasses,
@@ -40,28 +41,84 @@ export interface ReadingHost {
 	onReadingRendered(path: string): void;
 }
 
-interface TextSlice {
-	node: Text;
-	start: number;
-	end: number;
-}
+// One run of the flat text, mapped back to what produced it: either a text
+// node (splittable, so a highlight can start or end inside it) or an atom —
+// an element whose internals must be left alone and highlighted as a unit.
+type TextSlice =
+	| { kind: 'text'; node: Text; start: number; end: number }
+	| { kind: 'atom'; el: HTMLElement; start: number; end: number };
+
+// Rendered elements treated as atoms. Obsidian renders inline and display
+// maths through MathJax, which draws each glyph as a CSS-styled <mjx-c> with
+// no text of its own and puts the only readable text in a visually hidden
+// <mjx-assistive-mml> copy. Walking that naively wraps the HIDDEN text and
+// leaves the visible formula unhighlighted — the Reading-view twin of the
+// Live Preview widget problem (see editor/livePreview.ts). Taking the whole
+// container as one unit contributes its text to the flat string exactly once
+// and highlights the element itself.
+const ATOM_SELECTOR = '.math, mjx-container';
+
+// Maths delimiters in the markdown source. A MathJax build with assistive
+// MathML switched off renders no readable text at all, so the formula leaves
+// no trace in the flat text for the matcher to reach: an annotation written
+// over `… for $x > 0$` resolves only as far as `… for `, stopping dead at an
+// atom that contributed nothing. When the stored quote is known to contain
+// maths, an empty atom sitting on either edge of the match is taken to BE
+// that maths and highlighted with it.
+const MATH_DELIMITERS = /\$|\\\(|\\\[/;
 
 // Concatenated text content of an element plus per-node offsets, so a match
 // range in the flat string maps back onto the DOM.
 function collectTextSlices(root: HTMLElement): { text: string; slices: TextSlice[] } {
-	const doc = root.ownerDocument;
-	const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
 	const slices: TextSlice[] = [];
 	let text = '';
-	let node = walker.nextNode();
-	while (node) {
-		const value = node.nodeValue ?? '';
-		slices.push({ node: node as Text, start: text.length, end: text.length + value.length });
-		text += value;
-		node = walker.nextNode();
-	}
+
+	const visit = (node: Node): void => {
+		if (node.nodeType === Node.TEXT_NODE) {
+			const value = node.nodeValue ?? '';
+			slices.push({
+				kind: 'text',
+				node: node as Text,
+				start: text.length,
+				end: text.length + value.length,
+			});
+			text += value;
+			return;
+		}
+		if (node.nodeType !== Node.ELEMENT_NODE) return;
+		const el = node as HTMLElement;
+		if (el.matches(ATOM_SELECTOR)) {
+			const value = (el.textContent ?? '').replace(/\s+/g, ' ').trim();
+			slices.push({ kind: 'atom', el, start: text.length, end: text.length + value.length });
+			text += value;
+			return;
+		}
+		for (const child of Array.from(node.childNodes)) visit(child);
+	};
+
+	for (const child of Array.from(root.childNodes)) visit(child);
 	return { text, slices };
 }
+
+// Undo paintAtom. The listener goes with the element when Obsidian re-renders
+// the section; what has to be cleared is the styling, so a stale highlight
+// never survives on a formula no annotation covers any more.
+export function restoreAtom(el: HTMLElement): void {
+	el.removeClass(WIDGET_HL_CLASS);
+	el.removeAttribute('data-mdann-id');
+	for (const prop of ATOM_STYLE_PROPS) el.style.removeProperty(prop);
+	if (el.getAttribute('style') === '') el.removeAttribute('style');
+}
+
+// Every property highlightStyleVars can set, so teardown removes exactly what
+// was added and nothing MathJax put there itself.
+const ATOM_STYLE_PROPS = [
+	'--mdann-light-fg',
+	'--mdann-light-bg',
+	'--mdann-dark-fg',
+	'--mdann-dark-bg',
+	'font-size',
+];
 
 export function unwrapHighlightSpan(span: Element): void {
 	const parent = span.parentNode;
@@ -84,14 +141,21 @@ export function sweepHighlightSpans(root: ParentNode): void {
 	)) {
 		marker.remove();
 	}
+	for (const atom of Array.from(root.querySelectorAll<HTMLElement>(`.${WIDGET_HL_CLASS}`))) {
+		restoreAtom(atom);
+	}
 }
 
 class HighlightRenderChild extends MarkdownRenderChild {
 	private spans: HTMLElement[] = [];
 	private markers: HTMLElement[] = [];
+	// Elements we styled in place rather than wrapped (rendered maths). Their
+	// internals belong to MathJax, so teardown restores them instead of
+	// unwrapping them.
+	private atoms: HTMLElement[] = [];
 
 	get spanCount(): number {
-		return this.spans.length + this.markers.length;
+		return this.spans.length + this.markers.length + this.atoms.length;
 	}
 
 	// The flat text this element renders — what a caller compares against the
@@ -133,7 +197,16 @@ class HighlightRenderChild extends MarkdownRenderChild {
 		if (text === '') return;
 		const found = this.locate(text, selector, at);
 		if (!found) return;
-		this.wrapRange(slices, found.start, found.end, classes, styleVars, annotationId, onClick);
+		this.wrapRange(
+			slices,
+			found.start,
+			found.end,
+			classes,
+			styleVars,
+			annotationId,
+			onClick,
+			MATH_DELIMITERS.test(selector.exact),
+		);
 	}
 
 	// Insert an invisible, zero-width element at a point selector's position.
@@ -193,6 +266,14 @@ class HighlightRenderChild extends MarkdownRenderChild {
 	private insertAt(slices: TextSlice[], pos: number, el: HTMLElement): boolean {
 		const slice = slices.find((s) => pos >= s.start && pos <= s.end);
 		if (!slice) return false;
+		// An atom is indivisible: the marker goes to whichever side of it the
+		// offset is nearer.
+		if (slice.kind === 'atom') {
+			const parent = slice.el.parentNode;
+			if (!parent) return false;
+			parent.insertBefore(el, pos <= slice.start ? slice.el : slice.el.nextSibling);
+			return true;
+		}
 		const local = pos - slice.start;
 		const target = local > 0 && local < slice.node.length ? slice.node.splitText(local) : null;
 		const anchor = target ?? (local === 0 ? slice.node : slice.node.nextSibling);
@@ -210,11 +291,26 @@ class HighlightRenderChild extends MarkdownRenderChild {
 		styleVars: Record<string, string>,
 		annotationId: string,
 		onClick: () => void,
+		absorbEdgeAtoms = false,
 	): void {
 		const doc = this.containerEl.ownerDocument;
 		for (const slice of slices) {
 			const from = Math.max(start, slice.start);
 			const to = Math.min(end, slice.end);
+			if (slice.kind === 'atom') {
+				// Any overlap highlights the whole formula — there is no
+				// sub-range of a rendered equation to highlight. An atom that
+				// contributed no text at all counts when it sits inside the
+				// range rather than at either edge of it.
+				const covered =
+					slice.end > slice.start
+						? from < to
+						: absorbEdgeAtoms
+							? slice.start >= start && slice.start <= end
+							: slice.start > start && slice.start < end;
+				if (covered) this.paintAtom(slice.el, styleVars, annotationId, onClick);
+				continue;
+			}
 			if (from >= to) continue;
 
 			// Isolate the overlapping part of this text node, then wrap it.
@@ -235,11 +331,30 @@ class HighlightRenderChild extends MarkdownRenderChild {
 		}
 	}
 
+	// Style a rendered maths container in place. Deliberately not the ordinary
+	// highlight class: teardown unwraps `span.mdann-hl`, which would dismantle
+	// an element the plugin does not own.
+	private paintAtom(
+		el: HTMLElement,
+		styleVars: Record<string, string>,
+		annotationId: string,
+		onClick: () => void,
+	): void {
+		if (el.hasClass(WIDGET_HL_CLASS)) return;
+		el.addClass(WIDGET_HL_CLASS);
+		el.setAttribute('data-mdann-id', annotationId);
+		el.setCssProps(styleVars);
+		el.addEventListener('click', () => onClick());
+		this.atoms.push(el);
+	}
+
 	onunload(): void {
 		for (const span of this.spans) unwrapHighlightSpan(span);
 		this.spans = [];
 		for (const marker of this.markers) marker.remove();
 		this.markers = [];
+		for (const atom of this.atoms) restoreAtom(atom);
+		this.atoms = [];
 	}
 }
 

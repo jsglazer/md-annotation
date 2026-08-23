@@ -21,6 +21,14 @@ export const CONTEXT_LENGTH = 32;
 // Matches below this confidence are orphaned rather than rendered.
 export const HIGH_CONFIDENCE = 0.75;
 
+// The bar used by the deliberate orphan-repair pass instead of
+// HIGH_CONFIDENCE. Everyday resolution stays strict — a highlight silently
+// jumping to loosely similar text is worse than an orphan you can see. Repair
+// is the opposite trade: the annotation is already broken, so a best guess is
+// an improvement as long as it is not a coin toss. AMBIGUITY_MARGIN is
+// deliberately NOT relaxed with it: two plausible sites still never resolve.
+export const REPAIR_CONFIDENCE = 0.5;
+
 // Two candidates whose scores differ by less than this are "too close to
 // call" → ambiguous → orphan.
 export const AMBIGUITY_MARGIN = 0.05;
@@ -157,7 +165,11 @@ export function diceSimilarity(a: string, b: string): number {
 
 // ── Stage 1: exact-quote occurrences ───────────────────────────────────────
 
-function resolveExact(text: string, selector: TextQuoteSelector): MatchResult | null {
+function resolveExact(
+	text: string,
+	selector: TextQuoteSelector,
+	minConfidence: number,
+): MatchResult | null {
 	const occurrences = indicesOf(text, selector.exact);
 	if (occurrences.length === 0) return null;
 
@@ -193,7 +205,7 @@ function resolveExact(text: string, selector: TextQuoteSelector): MatchResult | 
 		return { status: 'orphaned', reason: 'ambiguous' };
 	}
 	const confidence = 0.5 + 0.5 * best.ctx;
-	if (confidence < HIGH_CONFIDENCE) return { status: 'orphaned', reason: 'ambiguous' };
+	if (confidence < minConfidence) return { status: 'orphaned', reason: 'ambiguous' };
 	return acceptWithRefresh(text, best.start, best.end, confidence, selector);
 }
 
@@ -295,10 +307,11 @@ function pickCandidate(
 	text: string,
 	candidates: Candidate[],
 	selector: TextQuoteSelector,
+	minConfidence: number,
 ): MatchResult | null {
 	const sorted = [...candidates].sort((a, b) => b.score - a.score || a.start - b.start);
 	const best = sorted[0];
-	if (!best || best.score < HIGH_CONFIDENCE) return null;
+	if (!best || best.score < minConfidence) return null;
 	// The ambiguity check compares the best against the best candidate at a
 	// DISTINCT location; overlapping variants of the same site don't count.
 	const rival = sorted.slice(1).find((c) => !sameSite(best, c));
@@ -331,7 +344,11 @@ function acceptWithRefresh(
 // A point selector has exact === '' and anchors purely on its prefix/suffix
 // context. Candidate positions come from occurrences of the innermost anchor
 // keys; the full stored context then scores each position.
-function resolvePoint(text: string, selector: TextQuoteSelector): MatchResult {
+function resolvePoint(
+	text: string,
+	selector: TextQuoteSelector,
+	minConfidence: number,
+): MatchResult {
 	const prefixKey = selector.prefix.slice(-ANCHOR_KEY_LENGTH);
 	const suffixKey = selector.suffix.slice(0, ANCHOR_KEY_LENGTH);
 	if (prefixKey === '' && suffixKey === '') return { status: 'orphaned', reason: 'not-found' };
@@ -345,7 +362,7 @@ function resolvePoint(text: string, selector: TextQuoteSelector): MatchResult {
 		.sort((a, b) => b.score - a.score || a.pos - b.pos);
 
 	const best = scored[0];
-	if (!best || best.score < HIGH_CONFIDENCE) return { status: 'orphaned', reason: 'not-found' };
+	if (!best || best.score < minConfidence) return { status: 'orphaned', reason: 'not-found' };
 	const rival = scored.slice(1).find((c) => c.pos !== best.pos);
 	if (rival && best.score - rival.score < AMBIGUITY_MARGIN) {
 		return { status: 'orphaned', reason: 'ambiguous' };
@@ -355,19 +372,35 @@ function resolvePoint(text: string, selector: TextQuoteSelector): MatchResult {
 
 // ── Public entry points ────────────────────────────────────────────────────
 
-export function resolveSelector(text: string, selector: TextQuoteSelector): MatchResult {
-	if (selector.exact === '') return resolvePoint(text, selector);
+export function resolveSelector(
+	text: string,
+	selector: TextQuoteSelector,
+	minConfidence: number = HIGH_CONFIDENCE,
+): MatchResult {
+	if (selector.exact === '') return resolvePoint(text, selector, minConfidence);
 
-	const exactResult = resolveExact(text, selector);
+	const exactResult = resolveExact(text, selector, minConfidence);
 	if (exactResult) return exactResult;
 
-	const anchored = pickCandidate(text, contextAnchoredCandidates(text, selector), selector);
+	const anchored = pickCandidate(
+		text,
+		contextAnchoredCandidates(text, selector),
+		selector,
+		minConfidence,
+	);
 	if (anchored) return anchored;
 
-	const fuzzy = pickCandidate(text, fuzzyScanCandidates(text, selector), selector);
+	const fuzzy = pickCandidate(text, fuzzyScanCandidates(text, selector), selector, minConfidence);
 	if (fuzzy) return fuzzy;
 
 	return { status: 'orphaned', reason: 'not-found' };
+}
+
+// The same staged resolution at the relaxed repair bar. Only ever run against
+// an annotation that is ALREADY orphaned, on an explicit "Fix orphans" (or the
+// opt-in automatic pass) — never as part of normal rendering.
+export function repairSelector(text: string, selector: TextQuoteSelector): MatchResult {
+	return resolveSelector(text, selector, REPAIR_CONFIDENCE);
 }
 
 export function resolveSelectors(

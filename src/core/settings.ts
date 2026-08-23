@@ -86,6 +86,12 @@ export interface MdAnnotationSettings {
 	gutterAnnotationsToolbar: ToolbarHighlight;
 	gutterCommentsToolbar: ToolbarHighlight;
 
+	// Off by default: an orphan is visible and fixable from the sidebar, and a
+	// silent repair at the relaxed bar could move a highlight without you
+	// noticing. On, the same pass the "Fix orphans" button runs is applied to
+	// the active note as it is parsed.
+	autoRepairOrphans: boolean;
+
 	// Navigation toggles (General tab), all on by default. Each governs one
 	// direction of the text ⇄ sidebar link; the "Sync text and sidebar" command
 	// flips syncTextAndSidebar, so the command and the setting are one state.
@@ -147,6 +153,7 @@ export function defaultSettings(): MdAnnotationSettings {
 			partStyle('', '#c8e6c9'),
 			partStyle('', '#2e5d33'),
 		),
+		autoRepairOrphans: false,
 		syncTextAndSidebar: true,
 		sidebarClickJumpsToText: true,
 		textClickJumpsToSidebar: true,
@@ -245,6 +252,7 @@ export function normalizeSettings(raw: unknown): MdAnnotationSettings {
 		'gutterAnnotationsEnabled',
 		'gutterCommentsEnabled',
 		'gutterOnlyWhenAnnotated',
+		'autoRepairOrphans',
 		'syncTextAndSidebar',
 		'sidebarClickJumpsToText',
 		'textClickJumpsToSidebar',
@@ -440,6 +448,12 @@ export const MARKER_CLASS = 'mdann-marker';
 // used where the annotation itself is deliberately not being drawn (formatting
 // switched off, or comment markers hidden) yet its card is still wanted.
 export const ANCHOR_CLASS = 'mdann-anchor';
+// Painted onto an element the plugin does not own — an Obsidian Live Preview
+// widget, or a rendered math container in Reading view — when an annotation
+// covers it. Deliberately NOT HIGHLIGHT_CLASS: teardown queries
+// `span.mdann-hl` and unwraps what it finds, which would tear apart the
+// foreign element. Its own rule in styles.css mirrors the highlight colours.
+export const WIDGET_HL_CLASS = 'mdann-widget-hl';
 
 export function formatClass(formatName: string): string {
 	return 'mdann-f-' + formatName.replace(/[^a-zA-Z0-9_-]/g, '-');

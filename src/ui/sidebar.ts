@@ -8,7 +8,7 @@
 // scroll the list to either end.
 
 import type { App, WorkspaceLeaf } from 'obsidian';
-import { ItemView, Modal, setIcon } from 'obsidian';
+import { ItemView, Modal, Notice, setIcon } from 'obsidian';
 
 import { lineNumberAt, numberComments } from '../core/ordering';
 import { highlightClasses, highlightStyleVars } from '../core/settings';
@@ -143,6 +143,7 @@ export class AnnotationSidebarView extends ItemView {
 		}
 		if (visibleOrphaned.length > 0) {
 			this.sectionHeader(root, this.countLabel('Orphaned', visibleOrphaned.length, orphaned.length));
+			this.renderFixOrphans(root, file.path);
 			for (const annotation of visibleOrphaned) {
 				this.renderCard(
 					root,
@@ -310,6 +311,26 @@ export class AnnotationSidebarView extends ItemView {
 
 	private sectionHeader(root: HTMLElement, text: string): void {
 		root.createEl('div', { text, cls: 'mdann-section' });
+	}
+
+	// Re-runs matching for the orphans in this note at a relaxed confidence
+	// bar, adopting each result that lands somewhere unambiguous. Whatever it
+	// cannot place with confidence stays orphaned for a manual re-anchor.
+	private renderFixOrphans(root: HTMLElement, path: string): void {
+		const row = root.createDiv({ cls: 'mdann-fix-orphans' });
+		const btn = row.createEl('button', { text: 'Fix orphans' });
+		btn.setAttribute(
+			'aria-label',
+			'Search this note again for each orphaned annotation, at a lower confidence bar',
+		);
+		btn.addEventListener('click', () => {
+			const repaired = this.plugin.repairOrphansInNote(path);
+			new Notice(
+				repaired === 0
+					? 'MD Annotation: no orphan could be placed with confidence'
+					: `MD Annotation: re-anchored ${repaired} orphan${repaired === 1 ? '' : 's'}`,
+			);
+		});
 	}
 
 	private renderCard(
