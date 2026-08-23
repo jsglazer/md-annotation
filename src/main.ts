@@ -1000,15 +1000,33 @@ export default class MdAnnotationPlugin extends Plugin {
 	// activateSidebar directly — they must never toggle the sidebar shut.
 	async toggleSidebar(): Promise<void> {
 		const existing = this.app.workspace.getLeavesOfType(SIDEBAR_VIEW_TYPE)[0];
+		// getActiveViewOfType tracks keyboard focus, not on-screen visibility —
+		// with the editor focused (the common case) it reports null even while
+		// the sidebar is plainly showing. offsetParent is null only when the
+		// element (or an ancestor) isn't rendered, e.g. a background tab behind
+		// another one in the same split, so it reflects real visibility instead.
 		const visible =
 			existing !== undefined &&
-			this.app.workspace.getActiveViewOfType(AnnotationSidebarView) !== null &&
-			!this.app.workspace.rightSplit.collapsed;
+			!this.app.workspace.rightSplit.collapsed &&
+			existing.view.containerEl.offsetParent !== null;
 		if (visible) {
 			existing.detach();
+			// Detaching the only tab in the right split leaves it expanded but
+			// empty — a bare grey pane, since Obsidian doesn't auto-collapse a
+			// split just because it emptied out. Collapse it ourselves, but only
+			// when nothing else (e.g. Backlinks, Outline) is left to show there.
+			if (this.rightSplitIsEmpty()) this.app.workspace.rightSplit.collapse();
 			return;
 		}
 		await this.activateSidebar();
+	}
+
+	private rightSplitIsEmpty(): boolean {
+		let empty = true;
+		this.app.workspace.iterateAllLeaves((leaf) => {
+			if (leaf.getRoot() === this.app.workspace.rightSplit) empty = false;
+		});
+		return empty;
 	}
 
 	activeMarkdownFile(): TFile | null {

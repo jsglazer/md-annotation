@@ -4397,12 +4397,20 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
   // activateSidebar directly — they must never toggle the sidebar shut.
   async toggleSidebar() {
     const existing = this.app.workspace.getLeavesOfType(SIDEBAR_VIEW_TYPE)[0];
-    const visible = existing !== void 0 && this.app.workspace.getActiveViewOfType(AnnotationSidebarView) !== null && !this.app.workspace.rightSplit.collapsed;
+    const visible = existing !== void 0 && !this.app.workspace.rightSplit.collapsed && existing.view.containerEl.offsetParent !== null;
     if (visible) {
       existing.detach();
+      if (this.rightSplitIsEmpty()) this.app.workspace.rightSplit.collapse();
       return;
     }
     await this.activateSidebar();
+  }
+  rightSplitIsEmpty() {
+    let empty = true;
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      if (leaf.getRoot() === this.app.workspace.rightSplit) empty = false;
+    });
+    return empty;
   }
   activeMarkdownFile() {
     const file = this.app.workspace.getActiveFile();
