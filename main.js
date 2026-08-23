@@ -3582,6 +3582,7 @@ var SYNC_DEBOUNCE_MS = 150;
 var TEXT_FLASH_MS = 1200;
 var READING_GUTTER_DEBOUNCE_MS = 60;
 var TOOLBAR_HIGHLIGHT_DELAY_MS = 50;
+var TOGGLE_RIGHT_SIDEBAR_COMMAND_ID = "app:toggle-right-sidebar";
 var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
   constructor() {
     super(...arguments);
@@ -4399,18 +4400,12 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
     const existing = this.app.workspace.getLeavesOfType(SIDEBAR_VIEW_TYPE)[0];
     const visible = existing !== void 0 && !this.app.workspace.rightSplit.collapsed && existing.view.containerEl.offsetParent !== null;
     if (visible) {
-      existing.detach();
-      if (this.rightSplitIsEmpty()) this.app.workspace.rightSplit.collapse();
+      this.app.commands.executeCommandById(
+        TOGGLE_RIGHT_SIDEBAR_COMMAND_ID
+      );
       return;
     }
     await this.activateSidebar();
-  }
-  rightSplitIsEmpty() {
-    let empty = true;
-    this.app.workspace.iterateAllLeaves((leaf) => {
-      if (leaf.getRoot() === this.app.workspace.rightSplit) empty = false;
-    });
-    return empty;
   }
   activeMarkdownFile() {
     const file = this.app.workspace.getActiveFile();

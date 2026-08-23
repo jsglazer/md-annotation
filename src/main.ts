@@ -2,7 +2,7 @@
 // to Obsidian. All decision logic lives in src/core/; this file only injects
 // App/Vault/Workspace, timers, and randomness at the boundary.
 
-import type { Editor, MarkdownFileInfo, TFile } from 'obsidian';
+import type { App, Editor, MarkdownFileInfo, TFile } from 'obsidian';
 import { MarkdownView, Notice, Plugin } from 'obsidian';
 import type { EditorView } from '@codemirror/view';
 
@@ -50,6 +50,12 @@ const READING_GUTTER_DEBOUNCE_MS = 60;
 // Note Toolbar renders its own DOM per leaf/file/mode. A short delay lets that
 // finish first — handler order across two separate plugins is not guaranteed.
 const TOOLBAR_HIGHLIGHT_DELAY_MS = 50;
+
+// app.commands isn't part of Obsidian's public API surface, so it has no
+// typings — used only to invoke the core "Toggle the right sidebar" command
+// from toggleSidebar() below (see that method for why).
+type AppWithCommands = App & { commands: { executeCommandById(id: string): boolean } };
+const TOGGLE_RIGHT_SIDEBAR_COMMAND_ID = 'app:toggle-right-sidebar';
 
 export default class MdAnnotationPlugin extends Plugin {
 	settings: MdAnnotationSettings = normalizeSettings(null);
@@ -1010,23 +1016,18 @@ export default class MdAnnotationPlugin extends Plugin {
 			!this.app.workspace.rightSplit.collapsed &&
 			existing.view.containerEl.offsetParent !== null;
 		if (visible) {
-			existing.detach();
-			// Detaching the only tab in the right split leaves it expanded but
-			// empty — a bare grey pane, since Obsidian doesn't auto-collapse a
-			// split just because it emptied out. Collapse it ourselves, but only
-			// when nothing else (e.g. Backlinks, Outline) is left to show there.
-			if (this.rightSplitIsEmpty()) this.app.workspace.rightSplit.collapse();
+			// detach() + a manual rightSplit.collapse() (tried in v1.0.16-1.0.18)
+			// still left the pane visible in some layouts. Obsidian's own core
+			// "Toggle the right sidebar" command is what its native collapse arrow
+			// runs, so delegate to it rather than keep reimplementing that
+			// collapse ourselves — it leaves the leaf (and any other tabs sharing
+			// the split, e.g. Backlinks) intact and just hides the pane.
+			(this.app as AppWithCommands).commands.executeCommandById(
+				TOGGLE_RIGHT_SIDEBAR_COMMAND_ID,
+			);
 			return;
 		}
 		await this.activateSidebar();
-	}
-
-	private rightSplitIsEmpty(): boolean {
-		let empty = true;
-		this.app.workspace.iterateAllLeaves((leaf) => {
-			if (leaf.getRoot() === this.app.workspace.rightSplit) empty = false;
-		});
-		return empty;
 	}
 
 	activeMarkdownFile(): TFile | null {
