@@ -64,7 +64,7 @@ The two are distinguished by whether text is selected when you run the single **
 | **Show/hide annotations in the gutter** | Toggle the margin cards for annotations. Flips the same persisted setting shown on the Gutter tab. |
 | **Show/hide comments in the gutter** | Toggle the margin cards for comments. Flips the same persisted setting shown on the Gutter tab. |
 | **Sync text and sidebar** | Toggle continuous syncing of the sidebar to the entry nearest the cursor. Flips the same persisted setting shown on the General tab. |
-| **Open annotation sidebar** | Open the annotations panel |
+| **Toggle annotation sidebar** | Show the annotations panel if it's hidden, hide it if it's showing (also bound to the ribbon icon) |
 
 The Annotate action is also in the editor context menu — shown as *Annotate selection* or *Insert comment* depending on whether text is selected.
 
