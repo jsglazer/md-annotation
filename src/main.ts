@@ -107,7 +107,7 @@ export default class MdAnnotationPlugin extends Plugin {
 		this.registerView(SIDEBAR_VIEW_TYPE, (leaf) => new AnnotationSidebarView(leaf, this));
 		this.addSettingTab(new MdAnnotationSettingTab(this.app, this));
 		this.addRibbonIcon('highlighter', 'Toggle annotation sidebar', () => {
-			void this.activateSidebar();
+			void this.toggleSidebar();
 		});
 
 		// One command covers both cases: with a selection it adds an annotation
@@ -125,7 +125,7 @@ export default class MdAnnotationPlugin extends Plugin {
 			name: 'Toggle annotation sidebar',
 			icon: 'panel-right',
 			callback: () => {
-				void this.activateSidebar();
+				void this.toggleSidebar();
 			},
 		});
 		this.addCommand({
@@ -978,6 +978,24 @@ export default class MdAnnotationPlugin extends Plugin {
 		if (!leaf) return;
 		await leaf.setViewState({ type: SIDEBAR_VIEW_TYPE, active: true });
 		await this.app.workspace.revealLeaf(leaf);
+	}
+
+	// Ribbon icon / command entry point: closes the sidebar if it's the
+	// front-most tab in an expanded right split, otherwise reveals it (same
+	// as activateSidebar). Other call sites (new comment, explicit reveal
+	// from the note) always want a reveal and must keep calling
+	// activateSidebar directly — they must never toggle the sidebar shut.
+	async toggleSidebar(): Promise<void> {
+		const existing = this.app.workspace.getLeavesOfType(SIDEBAR_VIEW_TYPE)[0];
+		const visible =
+			existing !== undefined &&
+			this.app.workspace.getActiveViewOfType(AnnotationSidebarView) !== null &&
+			!this.app.workspace.rightSplit.collapsed;
+		if (visible) {
+			existing.detach();
+			return;
+		}
+		await this.activateSidebar();
 	}
 
 	activeMarkdownFile(): TFile | null {
