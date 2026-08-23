@@ -22,7 +22,8 @@ MD Annotation is the delimiter-free successor to [Annotation Manager](https://gi
 - **Rendering** — highlights are applied transiently: CodeMirror decorations in Live Preview / Source mode, wrapped spans in Reading View. Nothing is ever written into the body text.
 - **Tables** — Obsidian renders a table as its own block, so annotations inside one are drawn through the same path Reading View uses rather than as editor decorations. The plugin works out which cell it is looking at by matching the rendered table's shape back to the table in the note, then places the annotation at its exact offset within that cell. If a note contains two structurally identical tables there is no way to tell them apart, so it leaves those annotations undrawn rather than risk putting them in the wrong table — they stay intact and editable in the sidebar.
 - **Margin cards** — the optional gutter draws each note as a card in the margin, level with the line it belongs to. In the editor the positions come from CodeMirror's own geometry; in Reading View they are measured from the rendered spans. Both share the same card, so a note reads and edits identically wherever you are.
-- **Self-healing** — when an edit shifts a highlight and it re-resolves with high confidence, the refreshed selector is saved back automatically. Low-confidence or ambiguous matches are flagged as *orphaned* — the plugin never guesses.
+- **Self-healing** — when an edit shifts a highlight and it re-resolves with high confidence, the refreshed selector is saved back automatically. Low-confidence or ambiguous matches are flagged as *orphaned* — the plugin never guesses. **Fix orphans** searches again at a lower confidence bar when you ask it to (see below).
+- **Maths** — an annotation covering inline LaTeX highlights the rendered formula, not just the text around it. Live Preview and Reading View each swap the source for something the ordinary highlight cannot reach — a CodeMirror widget in one, a MathJax container in the other — so the plugin styles those elements directly instead.
 
 ## Annotations vs. comments
 
@@ -47,7 +48,8 @@ The two are distinguished by whether text is selected when you run the single **
 - **A command per format** — each format automatically gets its own **Apply - _name_** command (usable from the Command Palette, a hotkey, or a toolbar); adding, renaming, or deleting a format creates or removes its command instantly
 - **Note Toolbar integration** — a paste-in script builds a live "apply format" menu from those commands, so you can highlight the selection (or drop a comment at the cursor) from a [Note Toolbar](https://github.com/chrisgurney/obsidian-note-toolbar) button (see below). A toolbar button bound to a gutter toggle can also **change color while that gutter is on**, so the toolbar shows its state at a glance.
 - **Queryable from Dataview / Datacore** — a public JS API for `dataviewjs` / `datacorejs` / `datacorejsx` blocks (see below)
-- **Orphan repair** — orphaned annotations are flagged; select the new text and re-anchor with one click
+- **Orphan repair** — orphaned annotations get their own sidebar section. **Fix orphans** searches the note again at a lower confidence bar and re-anchors everything it can place unambiguously; anything still in doubt waits for you to select the new text and re-anchor it with one click. Optionally automatic.
+- **Highlights LaTeX** — annotations spanning inline maths (`$x > 0$`) are highlighted in Live Preview and Reading View as well as Source mode, formula included
 - **Metadata** on every annotation: author (from settings), status, created / modified / closed timestamps
 - **Mobile support** — no desktop-only APIs
 
@@ -70,7 +72,7 @@ The Annotate action is also in the editor context menu — shown as *Annotate se
 
 Settings are organized into **General / Annotations / Comments / Gutter** tabs:
 
-- **General** — the author name recorded on every annotation you create; three **navigation** toggles (all on by default); and **format export / import**
+- **General** — the author name recorded on every annotation you create; three **navigation** toggles (all on by default); the **orphaned annotations** toggle; and **format export / import**
 - **Annotations** — a formatting visibility toggle, plus a per-format grid: Use checkbox, editable name, Fr/Bg colors for light and dark themes (each color has its own enable checkbox), font size, and a live sample-text example. Renaming a format here also updates every annotated note.
 - **Comments** — hide-markers and formatting toggles, plus the dedicated comment format's Fr/Bg colors per theme with a live example
 - **Gutter** — everything about the margin cards: show-toggles and left/right margin choice for annotations and for comments independently, the shared width, a card font size per type, and the optional Note Toolbar button highlight (see below)
@@ -104,6 +106,14 @@ Each direction of the text ⇄ sidebar link can be switched off independently:
 | **Sync text and sidebar** | Moving the cursor in the note scrolls the sidebar to the nearest entry |
 | **Sidebar click jumps to text** | Clicking a sidebar entry selects and scrolls to that text in the note |
 | **Text click jumps to sidebar** | Clicking annotated text or a comment marker opens the sidebar, scrolls to that entry, and puts the cursor in its comment box |
+
+### Orphaned annotations
+
+An annotation is *orphaned* when the text it was anchored to has changed too much to be recognised, or when two places in the note are equally good matches. Orphans are listed in their own section of the sidebar with the reason, and are never drawn in the note — the plugin would rather show you a broken anchor than move a highlight onto the wrong words.
+
+**Fix orphans**, at the top of that section, searches the note again at a lower confidence bar than everyday matching uses, and re-anchors each orphan that lands somewhere unambiguous — re-capturing its quote and context from where it actually landed. Two plausible sites are still never chosen between, at any bar: those stay orphaned for you to select the new text and press **Re-anchor to selection**.
+
+**Fix orphans automatically** (General → Orphaned annotations) runs the same pass whenever a note is read, so orphans repair themselves without the button. It is **off by default** — a repair at the lower bar can move a highlight without you seeing it happen, and an orphan you can see and fix is easier to live with than one that quietly went somewhere else.
 
 ### Sharing formats between vaults
 
