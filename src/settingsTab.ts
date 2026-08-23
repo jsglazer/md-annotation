@@ -473,7 +473,7 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 		this.renderToggle(
 			containerEl,
 			'Text click jumps to sidebar',
-			'Clicking annotated text or a comment marker opens the sidebar, scrolls to that entry and puts the cursor in its comment box',
+			'Clicking annotated text or a comment marker opens the sidebar, scrolls to that entry and puts the cursor in its comment box (also toggled by the "Text click jumps to sidebar" command). Turn off if clicking into an annotation to select or copy text keeps distractingly popping the sidebar open.',
 			() => this.plugin.settings.textClickJumpsToSidebar,
 			(v) => {
 				this.plugin.settings.textClickJumpsToSidebar = v;

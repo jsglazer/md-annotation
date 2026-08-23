@@ -2689,7 +2689,7 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
     this.renderToggle(
       containerEl,
       "Text click jumps to sidebar",
-      "Clicking annotated text or a comment marker opens the sidebar, scrolls to that entry and puts the cursor in its comment box",
+      'Clicking annotated text or a comment marker opens the sidebar, scrolls to that entry and puts the cursor in its comment box (also toggled by the "Text click jumps to sidebar" command). Turn off if clicking into an annotation to select or copy text keeps distractingly popping the sidebar open.',
       () => this.plugin.settings.textClickJumpsToSidebar,
       (v) => {
         this.plugin.settings.textClickJumpsToSidebar = v;
@@ -3671,6 +3671,18 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
             }
           }
         }
+      }
+    });
+    this.addCommand({
+      id: "toggle-text-click-jump",
+      name: "Text click jumps to sidebar",
+      icon: "mouse-pointer-click",
+      callback: () => {
+        this.settings.textClickJumpsToSidebar = !this.settings.textClickJumpsToSidebar;
+        void this.saveSettings();
+        new import_obsidian6.Notice(
+          `Text click jump to sidebar ${this.settings.textClickJumpsToSidebar ? "on" : "off"}`
+        );
       }
     });
     this.addCommand({

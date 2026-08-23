@@ -153,6 +153,19 @@ export default class MdAnnotationPlugin extends Plugin {
 			},
 		});
 		this.addCommand({
+			id: 'toggle-text-click-jump',
+			name: 'Text click jumps to sidebar',
+			icon: 'mouse-pointer-click',
+			callback: () => {
+				// The command and the General-tab toggle are one persisted state.
+				this.settings.textClickJumpsToSidebar = !this.settings.textClickJumpsToSidebar;
+				void this.saveSettings();
+				new Notice(
+					`Text click jump to sidebar ${this.settings.textClickJumpsToSidebar ? 'on' : 'off'}`,
+				);
+			},
+		});
+		this.addCommand({
 			id: 'toggle-annotation-formats',
 			name: 'Show/hide annotation formats',
 			callback: () => {
