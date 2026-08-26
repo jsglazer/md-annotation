@@ -449,27 +449,40 @@ body.theme-dark .mdann-gutter-leader {
 	margin-bottom: var(--size-4-1);
 }
 
-/* ── Sidebar format selector ─────────────────────────────────────────── */
+/* ── End-of-text rule ────────────────────────────────────────────────── */
 
-.mdann-format-select-row {
+/* Drawn under the last line of body text (the "Show/hide the end-of-text line"
+   command). --mdann-end-line is set inline per theme from settings; without a
+   colour configured it falls back to the theme's own divider. */
+.cm-line.mdann-body-end {
+	border-bottom: 1px solid var(--mdann-end-line, var(--background-modifier-border));
+	padding-bottom: 2px;
+}
+
+/* ── Sidebar category selector ───────────────────────────────────────── */
+
+.mdann-category-select-row {
 	display: flex;
 	align-items: center;
 	gap: var(--size-4-1);
 	margin-bottom: var(--size-4-1);
 }
 
-.mdann-format-select-label {
+.mdann-category-select-label {
 	font-size: var(--font-ui-smaller);
 	color: var(--text-muted);
 }
 
-.mdann-format-select {
+.mdann-category-select {
 	flex: 1;
 	min-width: 0;
 	font-size: var(--font-ui-small);
+	/* Obsidian's default dropdown fill is a grey that reads as disabled next to
+	   the white Note box below it — match that box instead. */
+	background-color: var(--background-primary);
 }
 
-/* Status / delete icon buttons, pinned to the end of the format row */
+/* Status / delete icon buttons, pinned to the end of the category row */
 .mdann-icon-btn {
 	flex: none;
 	display: flex;

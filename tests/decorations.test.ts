@@ -8,7 +8,7 @@ function annotation(id: string, type: 'highlight' | 'comment'): Annotation {
 	return {
 		id,
 		type,
-		format: type === 'comment' ? '' : 'Yellow',
+		category: type === 'comment' ? '' : 'Yellow',
 		selector: { exact: type === 'comment' ? '' : 'quoted', prefix: '', suffix: '' },
 		comment: '',
 		author: 'Josh',

@@ -24,6 +24,7 @@ __export(main_exports, {
 });
 module.exports = __toCommonJS(main_exports);
 var import_obsidian6 = require("obsidian");
+var import_state2 = require("@codemirror/state");
 
 // src/core/types.ts
 function isRecord(v) {
@@ -35,6 +36,9 @@ function isTextQuoteSelector(v) {
 var ANNOTATION_KNOWN_KEYS = [
   "id",
   "type",
+  "category",
+  // Legacy alias for 'category' (pre-1.0.20). Listed as known so an old line
+  // never round-trips its category into `extras` as well.
   "format",
   "selector",
   "comment",
@@ -48,7 +52,8 @@ function parseAnnotationValue(v) {
   if (!isRecord(v)) return null;
   if (typeof v.id !== "string" || v.id === "") return null;
   if (v.type !== "highlight" && v.type !== "comment") return null;
-  if (typeof v.format !== "string") return null;
+  const category = typeof v.category === "string" ? v.category : v.format;
+  if (typeof category !== "string") return null;
   if (!isTextQuoteSelector(v.selector)) return null;
   if (typeof v.comment !== "string") return null;
   if (typeof v.author !== "string") return null;
@@ -66,7 +71,7 @@ function parseAnnotationValue(v) {
   const annotation = {
     id: v.id,
     type: v.type,
-    format: v.format,
+    category,
     selector: {
       exact: v.selector.exact,
       prefix: v.selector.prefix,
@@ -102,7 +107,9 @@ function parseDocument(doc) {
       break;
     }
   }
-  if (openIdx === -1) return { body: doc, annotations: [], unparseable: [] };
+  if (openIdx === -1) {
+    return { body: doc, annotations: [], unparseable: [], legacyCategoryKey: false };
+  }
   let closeIdx = -1;
   for (let i = openIdx + 1; i < lines.length; i++) {
     const line = lines[i];
@@ -119,6 +126,7 @@ function parseDocument(doc) {
   const body = tail.trim() === "" ? bodyLines.join("\n") : bodyLines.join("\n") + "\n" + tail;
   const annotations = [];
   const unparseable = [];
+  let legacyCategoryKey = false;
   for (const raw of contentLines) {
     const trimmed = raw.trim();
     if (trimmed === "") continue;
@@ -130,16 +138,52 @@ function parseDocument(doc) {
       continue;
     }
     const annotation = parseAnnotationValue(parsed);
-    if (annotation) annotations.push(annotation);
-    else unparseable.push(raw);
+    if (annotation) {
+      annotations.push(annotation);
+      if (usesLegacyCategoryKey(parsed)) legacyCategoryKey = true;
+    } else unparseable.push(raw);
   }
-  return { body, annotations, unparseable };
+  return { body, annotations, unparseable, legacyCategoryKey };
+}
+function usesLegacyCategoryKey(parsed) {
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+  const r = parsed;
+  return typeof r.category !== "string" && typeof r.format === "string";
+}
+function findBlockRange(doc) {
+  var _a, _b, _c, _d;
+  const lines = doc.split("\n");
+  let openIdx = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (line !== void 0 && isMarkerLine(line, BLOCK_OPEN)) {
+      openIdx = i;
+      break;
+    }
+  }
+  if (openIdx === -1) return null;
+  let closeIdx = lines.length - 1;
+  for (let i = openIdx + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (line !== void 0 && isMarkerLine(line, BLOCK_CLOSE)) {
+      closeIdx = i;
+      break;
+    }
+  }
+  let start = 0;
+  for (let i = 0; i < openIdx; i++) start += ((_b = (_a = lines[i]) == null ? void 0 : _a.length) != null ? _b : 0) + 1;
+  let end = start;
+  for (let i = openIdx; i <= closeIdx; i++) {
+    end += (_d = (_c = lines[i]) == null ? void 0 : _c.length) != null ? _d : 0;
+    if (i < closeIdx) end += 1;
+  }
+  return { start, end };
 }
 function serializeAnnotationLine(a) {
   const out = {
     id: a.id,
     type: a.type,
-    format: a.format,
+    category: a.category,
     selector: { exact: a.selector.exact, prefix: a.selector.prefix, suffix: a.selector.suffix },
     comment: a.comment,
     author: a.author,
@@ -192,12 +236,12 @@ function removeAnnotation(doc, id) {
   if (next.length === annotations.length) return doc;
   return composeDocument(body, next, unparseable);
 }
-function renameAnnotationFormat(doc, oldName, newName) {
+function renameAnnotationCategory(doc, oldName, newName) {
   const { body, annotations, unparseable } = parseDocument(doc);
   let changed = false;
   for (const a of annotations) {
-    if (a.format === oldName) {
-      a.format = newName;
+    if (a.category === oldName) {
+      a.category = newName;
       changed = true;
     }
   }
@@ -211,18 +255,24 @@ function removeUnparseableLine(doc, raw) {
   const next = [...unparseable.slice(0, idx), ...unparseable.slice(idx + 1)];
   return composeDocument(body, annotations, next);
 }
+function normalizeBlock(doc) {
+  const { body, annotations, unparseable } = parseDocument(doc);
+  if (annotations.length === 0 && unparseable.length === 0) return doc;
+  return composeDocument(body, annotations, unparseable);
+}
 
 // src/api.ts
-function clone(v) {
-  return structuredClone(v);
+function clone(a) {
+  return { ...structuredClone(a), format: a.category };
 }
-var FORMAT_COMMAND_PREFIX = "md-annotation:apply-";
-function createApi(vault, getFormatNames) {
+var CATEGORY_COMMAND_PREFIX = "md-annotation:apply-";
+function createApi(vault, getCategoryNames) {
+  const getCategoryCommandId = (categoryName) => getCategoryNames().includes(categoryName) ? `${CATEGORY_COMMAND_PREFIX}${categoryName}` : null;
   return {
-    getFormatNames,
-    getFormatCommandId(formatName) {
-      return getFormatNames().includes(formatName) ? `${FORMAT_COMMAND_PREFIX}${formatName}` : null;
-    },
+    getCategoryNames,
+    getCategoryCommandId,
+    getFormatNames: getCategoryNames,
+    getFormatCommandId: getCategoryCommandId,
     async getAnnotations(path) {
       const file = vault.getFileByPath(path);
       if (!file || file.extension !== "md") return [];
@@ -259,7 +309,7 @@ function createAnnotation(input) {
   return {
     id: input.id,
     type: input.type,
-    format: input.format,
+    category: input.category,
     selector: input.selector,
     comment: input.comment,
     author: input.author,
@@ -603,7 +653,7 @@ function colorOption(color = "") {
 function partStyle(fr = "", bg = "") {
   return { fr: colorOption(fr), bg: colorOption(bg) };
 }
-function makeFormatStyle() {
+function makeCategoryStyle() {
   return { use: true, fontSize: "", light: partStyle(), dark: partStyle() };
 }
 function isUnsafeKey(key) {
@@ -612,7 +662,7 @@ function isUnsafeKey(key) {
 function defaultSettings() {
   return {
     author: "",
-    formatStyles: {
+    categoryStyles: {
       Yellow: {
         use: true,
         fontSize: "",
@@ -623,6 +673,9 @@ function defaultSettings() {
     annotationFormattingEnabled: true,
     commentsFormattingEnabled: true,
     commentsHiddenEnabled: false,
+    hideAnnotationBlock: false,
+    bodyEndLineEnabled: false,
+    bodyEndLineColor: { light: colorOption("#b0b0b0"), dark: colorOption("#5a5a5a") },
     gutterAnnotationsEnabled: true,
     gutterCommentsEnabled: true,
     gutterAnnotationsSide: "right",
@@ -691,9 +744,9 @@ function readToolbarHighlight(v, fallback) {
     style: asRecord(r.style) ? readThemedPartStyles(r.style) : fallback.style
   };
 }
-function readFormatStyle(v) {
+function readCategoryStyle(v) {
   const r = asRecord(v);
-  if (!r) return makeFormatStyle();
+  if (!r) return makeCategoryStyle();
   return {
     use: r.use !== false,
     fontSize: readString(r.fontSize),
@@ -702,6 +755,7 @@ function readFormatStyle(v) {
   };
 }
 function normalizeSettings(raw) {
+  var _a;
   const s = defaultSettings();
   const r = asRecord(raw);
   if (!r) return s;
@@ -710,6 +764,8 @@ function normalizeSettings(raw) {
     "annotationFormattingEnabled",
     "commentsFormattingEnabled",
     "commentsHiddenEnabled",
+    "hideAnnotationBlock",
+    "bodyEndLineEnabled",
     "gutterAnnotationsEnabled",
     "gutterCommentsEnabled",
     "gutterOnlyWhenAnnotated",
@@ -735,16 +791,16 @@ function normalizeSettings(raw) {
     s.gutterAnnotationsToolbar
   );
   s.gutterCommentsToolbar = readToolbarHighlight(r.gutterCommentsToolbar, s.gutterCommentsToolbar);
-  const styles = asRecord(r.formatStyles);
+  const styles = (_a = asRecord(r.categoryStyles)) != null ? _a : asRecord(r.formatStyles);
   if (styles) {
     const next = {};
     for (const [name, value] of Object.entries(styles)) {
       if (name === "" || isUnsafeKey(name)) continue;
       const v = asRecord(value);
       if (!v) continue;
-      next[name] = readFormatStyle(v);
+      next[name] = readCategoryStyle(v);
     }
-    if (Object.keys(next).length > 0) s.formatStyles = next;
+    if (Object.keys(next).length > 0) s.categoryStyles = next;
   } else if (Array.isArray(r.formats)) {
     const next = {};
     for (const item of r.formats) {
@@ -760,7 +816,11 @@ function normalizeSettings(raw) {
         dark: legacyPartStyle(style == null ? void 0 : style.dark)
       };
     }
-    if (Object.keys(next).length > 0) s.formatStyles = next;
+    if (Object.keys(next).length > 0) s.categoryStyles = next;
+  }
+  const bel = asRecord(r.bodyEndLineColor);
+  if (bel) {
+    s.bodyEndLineColor = { light: readColorOption(bel.light), dark: readColorOption(bel.dark) };
   }
   const cs = asRecord(r.commentStyle);
   if (cs) {
@@ -773,27 +833,27 @@ function normalizeSettings(raw) {
   }
   return s;
 }
-var FORMATS_EXPORT_VERSION = 1;
-function exportFormats(settings) {
+var CATEGORIES_EXPORT_VERSION = 1;
+function exportCategories(settings) {
   const payload = {
-    version: FORMATS_EXPORT_VERSION,
-    formatStyles: settings.formatStyles,
+    version: CATEGORIES_EXPORT_VERSION,
+    categoryStyles: settings.categoryStyles,
     commentStyle: settings.commentStyle
   };
   return JSON.stringify(payload, null, "	");
 }
-function readFormatStyleRecord(v) {
+function readCategoryStyleRecord(v) {
   const styles = asRecord(v);
   const next = {};
   if (!styles) return next;
   for (const [name, value] of Object.entries(styles)) {
     if (name === "" || isUnsafeKey(name)) continue;
     if (!asRecord(value)) continue;
-    next[name] = readFormatStyle(value);
+    next[name] = readCategoryStyle(value);
   }
   return next;
 }
-function parseFormatsImport(text) {
+function parseCategoriesImport(text) {
   let raw;
   try {
     raw = JSON.parse(text);
@@ -802,28 +862,28 @@ function parseFormatsImport(text) {
   }
   const r = asRecord(raw);
   if (!r) return null;
-  const source = "formatStyles" in r ? r.formatStyles : raw;
-  const formatStyles = readFormatStyleRecord(source);
-  if (Object.keys(formatStyles).length === 0) return null;
+  const source = "categoryStyles" in r ? r.categoryStyles : "formatStyles" in r ? r.formatStyles : raw;
+  const categoryStyles = readCategoryStyleRecord(source);
+  if (Object.keys(categoryStyles).length === 0) return null;
   const commentStyle = asRecord(r.commentStyle) ? readThemedPartStyles(r.commentStyle) : null;
-  return { formatStyles, commentStyle };
+  return { categoryStyles, commentStyle };
 }
-function mergeFormats(current, incoming, mode) {
+function mergeCategories(current, incoming, mode) {
   if (mode === "replace") {
-    return { formatStyles: { ...incoming }, added: Object.keys(incoming), skipped: [] };
+    return { categoryStyles: { ...incoming }, added: Object.keys(incoming), skipped: [] };
   }
-  const formatStyles = { ...current };
+  const categoryStyles = { ...current };
   const added = [];
   const skipped = [];
   for (const [name, style] of Object.entries(incoming)) {
-    if (name in formatStyles) {
+    if (name in categoryStyles) {
       skipped.push(name);
       continue;
     }
-    formatStyles[name] = style;
+    categoryStyles[name] = style;
     added.push(name);
   }
-  return { formatStyles, added, skipped };
+  return { categoryStyles, added, skipped };
 }
 function normalizeHex(value) {
   const v = value.trim();
@@ -841,29 +901,30 @@ function isValidFontSize(value) {
   return /^\d+(\.\d+)?(px|pt|em|rem|%|vh|vw)$/.test(v) || /^[a-zA-Z-]+$/.test(v);
 }
 var HIGHLIGHT_CLASS = "mdann-hl";
+var BODY_END_LINE_CLASS = "mdann-body-end";
 var COMMENT_CLASS = "mdann-comment";
 var MARKER_CLASS = "mdann-marker";
 var ANCHOR_CLASS = "mdann-anchor";
 var WIDGET_HL_CLASS = "mdann-widget-hl";
-function formatClass(formatName) {
-  return "mdann-f-" + formatName.replace(/[^a-zA-Z0-9_-]/g, "-");
+function categoryClass(categoryName) {
+  return "mdann-f-" + categoryName.replace(/[^a-zA-Z0-9_-]/g, "-");
 }
-function firstUsedFormatName(settings) {
-  for (const [name, style] of Object.entries(settings.formatStyles)) {
+function firstUsedCategoryName(settings) {
+  for (const [name, style] of Object.entries(settings.categoryStyles)) {
     if (style.use) return name;
   }
   return "";
 }
-function usableFormatNames(settings) {
-  return Object.entries(settings.formatStyles).filter(([, style]) => style.use).map(([name]) => name);
+function usableCategoryNames(settings) {
+  return Object.entries(settings.categoryStyles).filter(([, style]) => style.use).map(([name]) => name);
 }
-function resolveStyle(annotationType, formatName, settings) {
-  if (annotationType === "comment" && formatName === "") {
+function resolveStyle(annotationType, categoryName, settings) {
+  if (annotationType === "comment" && categoryName === "") {
     return { style: settings.commentStyle, fontSize: "" };
   }
-  const exact = settings.formatStyles[formatName];
+  const exact = settings.categoryStyles[categoryName];
   if (exact == null ? void 0 : exact.use) return { style: exact, fontSize: exact.fontSize };
-  const fallback = settings.formatStyles[firstUsedFormatName(settings)];
+  const fallback = settings.categoryStyles[firstUsedCategoryName(settings)];
   return fallback ? { style: fallback, fontSize: fallback.fontSize } : null;
 }
 function enabledColor(opt) {
@@ -873,8 +934,12 @@ function themedColors(style, dark) {
   const part = dark ? style.dark : style.light;
   return { fg: enabledColor(part.fr), bg: enabledColor(part.bg) };
 }
-function highlightStyleVars(annotationType, formatName, settings) {
-  const resolved = resolveStyle(annotationType, formatName, settings);
+function bodyEndLineColor(settings, dark) {
+  const opt = dark ? settings.bodyEndLineColor.dark : settings.bodyEndLineColor.light;
+  return enabledColor(opt);
+}
+function highlightStyleVars(annotationType, categoryName, settings) {
+  const resolved = resolveStyle(annotationType, categoryName, settings);
   if (!resolved) return {};
   const { style, fontSize } = resolved;
   const color = (opt, fallback) => enabledColor(opt) || fallback;
@@ -887,11 +952,11 @@ function highlightStyleVars(annotationType, formatName, settings) {
   if (isValidFontSize(fontSize)) vars["font-size"] = fontSize.trim();
   return vars;
 }
-function highlightStyleText(annotationType, formatName, settings) {
-  return Object.entries(highlightStyleVars(annotationType, formatName, settings)).map(([prop, value]) => `${prop}: ${value};`).join(" ");
+function highlightStyleText(annotationType, categoryName, settings) {
+  return Object.entries(highlightStyleVars(annotationType, categoryName, settings)).map(([prop, value]) => `${prop}: ${value};`).join(" ");
 }
-function gutterStyleVars(annotationType, formatName, settings) {
-  const resolved = resolveStyle(annotationType, formatName, settings);
+function gutterStyleVars(annotationType, categoryName, settings) {
+  const resolved = resolveStyle(annotationType, categoryName, settings);
   if (!resolved) return {};
   const { style } = resolved;
   const vars = {};
@@ -914,14 +979,14 @@ var GUTTER_STYLE_PROPS = [
   "--mdann-g-dark-bg",
   "font-size"
 ];
-function highlightClasses(annotationType, formatName, settings) {
+function highlightClasses(annotationType, categoryName, settings) {
   var _a;
-  if (annotationType === "comment" && formatName === "") {
+  if (annotationType === "comment" && categoryName === "") {
     return `${HIGHLIGHT_CLASS} ${COMMENT_CLASS}`;
   }
-  const known = (_a = settings.formatStyles[formatName]) == null ? void 0 : _a.use;
-  const name = known ? formatName : firstUsedFormatName(settings);
-  return name === "" ? HIGHLIGHT_CLASS : `${HIGHLIGHT_CLASS} ${formatClass(name)}`;
+  const known = (_a = settings.categoryStyles[categoryName]) == null ? void 0 : _a.use;
+  const name = known ? categoryName : firstUsedCategoryName(settings);
+  return name === "" ? HIGHLIGHT_CLASS : `${HIGHLIGHT_CLASS} ${categoryClass(name)}`;
 }
 function markerClasses() {
   return `${MARKER_CLASS} ${COMMENT_CLASS}`;
@@ -977,7 +1042,7 @@ var CardLayers = class {
       card.rendered = annotation.comment;
     }
     card.root.classList.toggle("mdann-gutter-card-closed", annotation.status === "closed");
-    const vars = gutterStyleVars(annotation.type, annotation.format, settings);
+    const vars = gutterStyleVars(annotation.type, annotation.category, settings);
     applyStyleProps(card.root, vars);
     applyStyleProps(card.leader, vars);
     return card;
@@ -1672,40 +1737,73 @@ function applyEditorDecorations(view, body, annotations, outcomes, settings, onM
     livePreview
   );
   const commentNumbers = numberComments(annotations, outcomes);
-  const builder = new import_state.RangeSetBuilder();
+  const items = [];
   for (const r of ranges) {
     if (r.from === r.to) {
       const styled = settings.commentsFormattingEnabled;
       const number = commentNumbers.get(r.annotation.id);
-      builder.add(
-        r.from,
-        r.to,
+      items.push(
         import_view.Decoration.widget({
           widget: new CommentMarkerWidget(
             r.annotation.id,
             markerClasses() + (styled ? "" : " mdann-marker-plain"),
-            styled ? highlightStyleText(r.annotation.type, r.annotation.format, settings) : "",
+            styled ? highlightStyleText(r.annotation.type, r.annotation.category, settings) : "",
             number !== void 0 ? String(number) : "",
             () => onMarkerClick(r.annotation.id)
           ),
           side: 1
-        })
+        }).range(r.from)
       );
       continue;
     }
-    builder.add(
-      r.from,
-      r.to,
+    items.push(
       import_view.Decoration.mark({
-        class: highlightClasses(r.annotation.type, r.annotation.format, settings),
+        class: highlightClasses(r.annotation.type, r.annotation.category, settings),
         attributes: {
           "data-mdann-id": r.annotation.id,
-          style: highlightStyleText(r.annotation.type, r.annotation.format, settings)
+          style: highlightStyleText(r.annotation.type, r.annotation.category, settings)
         }
-      })
+      }).range(r.from, r.to)
     );
   }
-  view.dispatch({ effects: setAnnotationDecorations.of(builder.finish()) });
+  addBlockAndEndLine(view, items, settings);
+  view.dispatch({
+    effects: setAnnotationDecorations.of(import_view.Decoration.set(items, true))
+  });
+}
+function addBlockAndEndLine(view, items, settings) {
+  if (!settings.hideAnnotationBlock && !settings.bodyEndLineEnabled) return;
+  const doc = view.state.doc;
+  const block = findBlockRange(doc.toString());
+  const bodyEnd = block ? block.start : doc.length;
+  if (settings.bodyEndLineEnabled) {
+    const line = lastNonBlankLineBefore(view, bodyEnd);
+    if (line !== null) {
+      const color = bodyEndLineColor(
+        settings,
+        view.dom.ownerDocument.body.classList.contains("theme-dark")
+      );
+      items.push(
+        import_view.Decoration.line({
+          class: BODY_END_LINE_CLASS,
+          ...color === "" ? {} : { attributes: { style: `--mdann-end-line: ${color};` } }
+        }).range(line)
+      );
+    }
+  }
+  if (settings.hideAnnotationBlock && block && block.end > block.start) {
+    items.push(import_view.Decoration.replace({ block: true }).range(block.start, block.end));
+  }
+}
+function lastNonBlankLineBefore(view, bodyEnd) {
+  const doc = view.state.doc;
+  let lineNumber = doc.lineAt(Math.max(0, Math.min(bodyEnd, doc.length))).number;
+  if (bodyEnd < doc.length && doc.line(lineNumber).from === bodyEnd) lineNumber--;
+  for (; lineNumber >= 1; lineNumber--) {
+    const line = doc.line(lineNumber);
+    if (line.text.trim() !== "") return line.from;
+  }
+  return null;
 }
 
 // src/editor/readingGutter.ts
@@ -2214,7 +2312,7 @@ function createReadingPostProcessor(host) {
         child.tryMarker(
           selector,
           markerClasses() + (styled2 ? "" : " mdann-marker-plain"),
-          styled2 ? highlightStyleVars(annotation.type, annotation.format, settings) : {},
+          styled2 ? highlightStyleVars(annotation.type, annotation.category, settings) : {},
           annotation.id,
           number !== void 0 ? String(number) : "",
           () => host.revealAnnotation(ctx.sourcePath, annotation.id),
@@ -2237,8 +2335,8 @@ function createReadingPostProcessor(host) {
       }
       child.tryWrap(
         selector,
-        `${highlightClasses(annotation.type, annotation.format, settings)} mdann-hl-clickable`,
-        highlightStyleVars(annotation.type, annotation.format, settings),
+        `${highlightClasses(annotation.type, annotation.category, settings)} mdann-hl-clickable`,
+        highlightStyleVars(annotation.type, annotation.category, settings),
         annotation.id,
         () => host.revealAnnotation(ctx.sourcePath, annotation.id),
         at
@@ -2371,11 +2469,11 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
-    this.pendingFormatName = "";
+    this.pendingCategoryName = "";
     this.activeTab = "general";
     this.saveTimer = null;
-    // A redraw triggered by an in-tab control (renaming a format, picking a
-    // toolbar item, importing formats…) should leave the scroll position alone
+    // A redraw triggered by an in-tab control (renaming a category, picking a
+    // toolbar item, importing categories…) should leave the scroll position alone
     // — display() rebuilds the whole pane from scratch, which would otherwise
     // snap it back to the top every time. Only an explicit tab-bar click resets
     // it, since that is a real navigation to different content.
@@ -2451,8 +2549,9 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
       })
     );
     this.renderNavigationSection(containerEl);
+    this.renderNoteLayoutSection(containerEl);
     this.renderOrphanSection(containerEl);
-    this.renderFormatTransferSection(containerEl);
+    this.renderCategoryTransferSection(containerEl);
   }
   // ── Gutter tab ───────────────────────────────────────────────────────────
   // Everything about the margin gutter in one place: what it shows, which
@@ -2588,7 +2687,7 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
       });
     });
   }
-  // The two colour rows, laid out like the format grid so Fr/Bg per theme
+  // The two colour rows, laid out like the category grid so Fr/Bg per theme
   // read the same way here as everywhere else in these settings.
   renderToolbarHighlightGrid(containerEl) {
     const wrap = containerEl.createDiv("mdann-grid-wrap");
@@ -2642,11 +2741,11 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
       })
     );
   }
-  // Font size for one type's gutter cards. Separate from a format's own Size
+  // Font size for one type's gutter cards. Separate from a category's own Size
   // column (Annotations/Comments tabs) — that one styles the in-text highlight
   // and the sidebar quote chip; this one styles only the gutter card, on
   // either editor or Reading-view gutters. Same free-text validation as the
-  // per-format field: a plain CSS length or bare keyword, reverting on blur
+  // per-category field: a plain CSS length or bare keyword, reverting on blur
   // otherwise.
   renderGutterFontSize(containerEl, name, getValue, setValue) {
     new import_obsidian3.Setting(containerEl).setName(name).setDesc("Example: 13px. Leave blank to use the default. Does not affect the sidebar.").addText((text) => {
@@ -2696,6 +2795,50 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
       }
     );
   }
+  // What the note itself looks like around the annotation data: whether the
+  // storage block at the foot of the file is visible at all, and whether the
+  // end of the body text is marked with a rule.
+  renderNoteLayoutSection(containerEl) {
+    new import_obsidian3.Setting(containerEl).setName("Note layout").setHeading();
+    this.renderToggle(
+      containerEl,
+      "Hide the annotation block",
+      'Collapse the %%md-annotation block at the foot of the note in Live Preview and Source mode, so its JSON stops competing with your text (also toggled by the "Show/hide the annotation block" command). Reading view never shows it. The block is only hidden from view \u2014 it is still there, and still written to.',
+      () => this.plugin.settings.hideAnnotationBlock,
+      (v) => {
+        this.plugin.settings.hideAnnotationBlock = v;
+      }
+    );
+    this.renderToggle(
+      containerEl,
+      "Show a line at the end of the text",
+      'Draw a rule under the last line of body text, so the note has a visible bottom edge once the annotation block is hidden (also toggled by the "Show/hide the end-of-text line" command)',
+      () => this.plugin.settings.bodyEndLineEnabled,
+      (v) => {
+        this.plugin.settings.bodyEndLineEnabled = v;
+      }
+    );
+    containerEl.createEl("p", {
+      text: "Colour of that rule, per theme. Uncheck a theme to fall back to whatever divider colour the theme itself uses.",
+      cls: "setting-item-description"
+    });
+    this.renderEndLineColors(containerEl);
+  }
+  // The rule's two colours, laid out like the other colour grids (checkbox,
+  // swatch, hex) but with one column per theme — a line has no Fr/Bg pair.
+  renderEndLineColors(containerEl) {
+    const wrap = containerEl.createDiv("mdann-grid-wrap");
+    const table = wrap.createEl("table", { cls: "mdann-grid-table" });
+    const thead = table.createEl("thead");
+    const hr = thead.createEl("tr");
+    hr.createEl("th", { text: "Light" });
+    hr.createEl("th", { text: "Dark", cls: "mdann-grid-sep" });
+    const tr = table.createEl("tbody").createEl("tr");
+    for (const theme of ["light", "dark"]) {
+      const td = tr.createEl("td", { cls: theme === "dark" ? "mdann-grid-sep" : "" });
+      this.renderColorCell(td, this.plugin.settings.bodyEndLineColor[theme], () => void 0);
+    }
+  }
   // An annotation whose text was edited beyond recognition is orphaned rather
   // than guessed at. The sidebar's "Fix orphans" button searches again at a
   // lower bar; this makes that pass automatic.
@@ -2715,46 +2858,47 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
       }
     );
   }
-  // Formats are stored in this vault's own data.json. Obsidian Sync replicates
-  // a vault to itself on other devices — it never bridges two different vaults
-  // — so moving formats between vaults is an explicit copy/paste.
-  renderFormatTransferSection(containerEl) {
-    new import_obsidian3.Setting(containerEl).setName("Share formats between vaults").setHeading();
+  // Categories are stored in this vault's own data.json. Obsidian Sync
+  // replicates a vault to itself on other devices — it never bridges two
+  // different vaults — so moving categories between vaults is an explicit
+  // copy/paste.
+  renderCategoryTransferSection(containerEl) {
+    new import_obsidian3.Setting(containerEl).setName("Share categories between vaults").setHeading();
     containerEl.createEl("p", {
-      text: "Formats live in this vault only. Obsidian Sync copies a vault to your other devices, not to your other vaults, so formats added in one vault never appear in another. Export them here and import the result in the other vault.",
+      text: "Categories live in this vault only. Obsidian Sync copies a vault to your other devices, not to your other vaults, so categories added in one vault never appear in another. Export them here and import the result in the other vault.",
       cls: "setting-item-description"
     });
-    new import_obsidian3.Setting(containerEl).setName("Export formats").setDesc("Copy every format (and the comment style) to the clipboard as JSON").addButton(
+    new import_obsidian3.Setting(containerEl).setName("Export categories").setDesc("Copy every category (and the comment style) to the clipboard as JSON").addButton(
       (btn) => btn.setButtonText("Copy to clipboard").onClick(() => {
-        const json = exportFormats(this.plugin.settings);
+        const json = exportCategories(this.plugin.settings);
         void navigator.clipboard.writeText(json).then(
           () => {
-            const count = Object.keys(this.plugin.settings.formatStyles).length;
-            new import_obsidian3.Notice(`Copied ${count} format${count === 1 ? "" : "s"} to the clipboard`);
+            const count = Object.keys(this.plugin.settings.categoryStyles).length;
+            new import_obsidian3.Notice(`Copied ${count} category${count === 1 ? "" : "ies"} to the clipboard`);
           },
           () => new import_obsidian3.Notice("Could not write to the clipboard")
         );
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Import formats").setDesc("Paste an exported payload to add its formats to this vault").addButton(
+    new import_obsidian3.Setting(containerEl).setName("Import categories").setDesc("Paste an exported payload to add its categories to this vault").addButton(
       (btn) => btn.setButtonText("Paste and import").setCta().onClick(() => {
-        new ImportFormatsModal(this.app, (text, mode) => this.importFormats(text, mode)).open();
+        new ImportCategoriesModal(this.app, (text, mode) => this.importCategories(text, mode)).open();
       })
     );
   }
   // Returns an outcome message for the modal; null means the import ran and
   // the modal can close.
-  importFormats(text, mode) {
-    const parsed = parseFormatsImport(text);
-    if (!parsed) return "That does not look like an exported format payload.";
-    const result = mergeFormats(this.plugin.settings.formatStyles, parsed.formatStyles, mode);
-    this.plugin.settings.formatStyles = result.formatStyles;
+  importCategories(text, mode) {
+    const parsed = parseCategoriesImport(text);
+    if (!parsed) return "That does not look like an exported category payload.";
+    const result = mergeCategories(this.plugin.settings.categoryStyles, parsed.categoryStyles, mode);
+    this.plugin.settings.categoryStyles = result.categoryStyles;
     if (parsed.commentStyle) this.plugin.settings.commentStyle = parsed.commentStyle;
     void this.saveAndRefresh().then(() => this.display());
     const added = result.added.length;
     const skipped = result.skipped.length;
     new import_obsidian3.Notice(
-      mode === "replace" ? `Replaced formats with ${added} imported format${added === 1 ? "" : "s"}` : `Imported ${added} format${added === 1 ? "" : "s"}` + (skipped > 0 ? `, kept ${skipped} already here` : "")
+      mode === "replace" ? `Replaced categories with ${added} imported categor${added === 1 ? "y" : "ies"}` : `Imported ${added} categor${added === 1 ? "y" : "ies"}` + (skipped > 0 ? `, kept ${skipped} already here` : "")
     );
     return null;
   }
@@ -2763,8 +2907,8 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
     new import_obsidian3.Setting(containerEl).setName("Annotation Visibility").setHeading();
     this.renderToggle(
       containerEl,
-      "Annotation formatting",
-      'Apply format colors to annotated text (also toggled by the "Show/hide annotation formats" command)',
+      "Annotation colors",
+      'Apply category colors to annotated text (also toggled by the "Show/hide annotation colors" command)',
       () => this.plugin.settings.annotationFormattingEnabled,
       (v) => {
         this.plugin.settings.annotationFormattingEnabled = v;
@@ -2775,31 +2919,31 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
       text: "Margin cards for annotations live on the Gutter tab.",
       cls: "setting-item-description"
     });
-    new import_obsidian3.Setting(containerEl).setName("Annotation Formats").setHeading();
+    new import_obsidian3.Setting(containerEl).setName("Annotation Categories").setHeading();
     containerEl.createEl("p", {
-      text: "Per-format colors for annotations. Fr = text color, Bg = background. Each checkbox controls whether that color is applied. Uncheck Use to disable a row without deleting it. Renaming a format also updates every note that references the old name.",
+      text: "Per-category colors for annotations. Fr = text color, Bg = background. Each checkbox controls whether that color is applied. Uncheck Use to disable a row without deleting it. Renaming a category also updates every note that references the old name.",
       cls: "setting-item-description"
     });
-    this.renderFormatGrid(containerEl);
-    new import_obsidian3.Setting(containerEl).setName("Add format").setDesc("Name shown in the format picker and stored on each annotation").addText(
+    this.renderCategoryGrid(containerEl);
+    new import_obsidian3.Setting(containerEl).setName("Add category").setDesc("Name shown in the category picker and stored on each annotation").addText(
       (text) => text.setPlaceholder("Key").onChange((v) => {
-        this.pendingFormatName = v.trim();
+        this.pendingCategoryName = v.trim();
       })
     ).addButton(
       (btn) => btn.setButtonText("Add").setCta().onClick(async () => {
-        const name = this.pendingFormatName;
-        if (!name || isUnsafeKey(name) || this.plugin.settings.formatStyles[name]) return;
-        this.plugin.settings.formatStyles[name] = makeFormatStyle();
+        const name = this.pendingCategoryName;
+        if (!name || isUnsafeKey(name) || this.plugin.settings.categoryStyles[name]) return;
+        this.plugin.settings.categoryStyles[name] = makeCategoryStyle();
         await this.saveAndRefresh();
         this.display();
       })
     );
   }
-  renderFormatGrid(containerEl) {
-    const names = Object.keys(this.plugin.settings.formatStyles).sort();
+  renderCategoryGrid(containerEl) {
+    const names = Object.keys(this.plugin.settings.categoryStyles).sort();
     if (names.length === 0) {
       containerEl.createEl("p", {
-        text: "No formats configured yet \u2014 add one below.",
+        text: "No categories configured yet \u2014 add one below.",
         cls: "setting-item-description"
       });
       return;
@@ -2823,10 +2967,10 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
       });
     }
     const tbody = table.createEl("tbody");
-    for (const name of names) this.renderFormatRow(tbody, name);
+    for (const name of names) this.renderCategoryRow(tbody, name);
   }
-  renderFormatRow(tbody, name) {
-    const style = this.plugin.settings.formatStyles[name];
+  renderCategoryRow(tbody, name) {
+    const style = this.plugin.settings.categoryStyles[name];
     if (!style) return;
     const tr = tbody.createEl("tr");
     tr.toggleClass("mdann-grid-row-unused", !style.use);
@@ -2841,10 +2985,10 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
       tr.toggleClass("mdann-grid-row-unused", !style.use);
       void this.saveAndRefresh();
     });
-    this.renderFormatNameCell(tr, name);
+    this.renderCategoryNameCell(tr, name);
     let exampleTd = null;
     const refreshExample = () => {
-      if (exampleTd) this.renderFormatExample(exampleTd, name);
+      if (exampleTd) this.renderCategoryExample(exampleTd, name);
     };
     for (const theme of ["light", "dark"]) {
       for (const field of ["fr", "bg"]) {
@@ -2868,21 +3012,21 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
     const delTd = tr.createEl("td");
     const delBtn = delTd.createEl("button", { text: "Del", cls: "mdann-grid-del" });
     delBtn.addEventListener("click", () => {
-      if (Object.keys(this.plugin.settings.formatStyles).length <= 1) {
-        new import_obsidian3.Notice("At least one format must remain");
+      if (Object.keys(this.plugin.settings.categoryStyles).length <= 1) {
+        new import_obsidian3.Notice("At least one category must remain");
         return;
       }
-      new ConfirmModal(this.app, `Delete the format "${name}"? This cannot be undone.`, () => {
-        delete this.plugin.settings.formatStyles[name];
+      new ConfirmModal(this.app, `Delete the category "${name}"? This cannot be undone.`, () => {
+        delete this.plugin.settings.categoryStyles[name];
         void this.saveAndRefresh().then(() => this.display());
       }).open();
     });
   }
-  // Editable name cell: renaming a format moves its style to the new key AND
-  // rewrites the stored name in every annotated note (plugin.renameFormat).
+  // Editable name cell: renaming a category moves its style to the new key AND
+  // rewrites the stored name in every annotated note (plugin.renameCategory).
   // Validates against blanks, prototype-unsafe keys, and existing names; on
   // a bad name the input reverts to the original and a Notice explains why.
-  renderFormatNameCell(tr, name) {
+  renderCategoryNameCell(tr, name) {
     const td = tr.createEl("td", { cls: "mdann-grid-name" });
     const input = td.createEl("input", {
       cls: "mdann-grid-name-input",
@@ -2895,15 +3039,15 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
         input.value = name;
         return;
       }
-      const styles = this.plugin.settings.formatStyles;
+      const styles = this.plugin.settings.categoryStyles;
       if (!next || isUnsafeKey(next) || styles[next]) {
         new import_obsidian3.Notice(
-          !next ? "Format name cannot be empty" : styles[next] ? `Format "${next}" already exists` : `"${next}" is not a valid format name`
+          !next ? "Category name cannot be empty" : styles[next] ? `Category "${next}" already exists` : `"${next}" is not a valid category name`
         );
         input.value = name;
         return;
       }
-      void this.plugin.renameFormat(name, next).then((ok) => {
+      void this.plugin.renameCategory(name, next).then((ok) => {
         if (!ok) input.value = name;
         this.display();
       });
@@ -2919,9 +3063,9 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
       }
     });
   }
-  renderFormatExample(td, name) {
+  renderCategoryExample(td, name) {
     td.empty();
-    const style = this.plugin.settings.formatStyles[name];
+    const style = this.plugin.settings.categoryStyles[name];
     if (!style) return;
     const theme = this.isDarkTheme() ? "dark" : "light";
     this.appendExampleSpan(
@@ -3016,8 +3160,8 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
     );
     this.renderToggle(
       containerEl,
-      "Comment formatting",
-      'Apply the comment colors to markers (also toggled by the "Show/hide comment formats" command)',
+      "Comment colors",
+      'Apply the comment colors to markers (also toggled by the "Show/hide comment colors" command)',
       () => this.plugin.settings.commentsFormattingEnabled,
       (v) => {
         this.plugin.settings.commentsFormattingEnabled = v;
@@ -3028,7 +3172,7 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
       text: "Margin cards for comments live on the Gutter tab.",
       cls: "setting-item-description"
     });
-    new import_obsidian3.Setting(containerEl).setName("Comment format").setHeading();
+    new import_obsidian3.Setting(containerEl).setName("Comment category").setHeading();
     containerEl.createEl("p", {
       text: "Colors for comment markers (comments are added with no text selected and render as a small icon at the insertion point). Fr = icon color, Bg = background.",
       cls: "setting-item-description"
@@ -3081,20 +3225,20 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
     );
   }
 };
-var ImportFormatsModal = class extends import_obsidian3.Modal {
+var ImportCategoriesModal = class extends import_obsidian3.Modal {
   constructor(app, onImport) {
     super(app);
     this.onImport = onImport;
   }
   onOpen() {
-    this.contentEl.createEl("h3", { text: "Import formats" });
+    this.contentEl.createEl("h3", { text: "Import categories" });
     this.contentEl.createEl("p", {
       text: "Paste the JSON copied by the export button in the other vault.",
       cls: "setting-item-description"
     });
     const input = this.contentEl.createEl("textarea", {
       cls: "mdann-import-input",
-      attr: { rows: "10", placeholder: '{ "version": 1, "formatStyles": { \u2026 } }', spellcheck: "false" }
+      attr: { rows: "10", placeholder: '{ "version": 1, "categoryStyles": { \u2026 } }', spellcheck: "false" }
     });
     const error = this.contentEl.createEl("p", { cls: "mdann-import-error" });
     const run = (mode) => {
@@ -3112,7 +3256,7 @@ var ImportFormatsModal = class extends import_obsidian3.Modal {
     replaceBtn.addEventListener("click", () => {
       new ConfirmModal(
         this.app,
-        "Replace every format in this vault with the imported ones? Annotations using a format that is not in the payload will fall back to the first enabled format until you reassign them.",
+        "Replace every category in this vault with the imported ones? Annotations using a category that is not in the payload will fall back to the first enabled category until you reassign them.",
         () => run("replace"),
         "Replace all"
       ).open();
@@ -3148,14 +3292,14 @@ var ConfirmModal = class extends import_obsidian3.Modal {
   }
 };
 
-// src/ui/formatSuggest.ts
+// src/ui/categorySuggest.ts
 var import_obsidian4 = require("obsidian");
-var FormatSuggestModal = class extends import_obsidian4.FuzzySuggestModal {
+var CategorySuggestModal = class extends import_obsidian4.FuzzySuggestModal {
   constructor(app, names, onChoose) {
     super(app);
     this.names = names;
     this.onChoose = onChoose;
-    this.setPlaceholder("Choose a format");
+    this.setPlaceholder("Choose a category");
   }
   getItems() {
     return this.names;
@@ -3174,10 +3318,10 @@ var SIDEBAR_VIEW_TYPE = "md-annotation-sidebar";
 var FLASH_MS = 1200;
 var COMMENT_FILTER = "c:";
 function filterValue(annotation) {
-  return annotation.format === "" ? COMMENT_FILTER : `f:${annotation.format}`;
+  return annotation.category === "" ? COMMENT_FILTER : `f:${annotation.category}`;
 }
 function filterLabel(annotation) {
-  return annotation.format === "" ? "Comment" : annotation.format;
+  return annotation.category === "" ? "Comment" : annotation.category;
 }
 var AnnotationSidebarView = class extends import_obsidian5.ItemView {
   constructor(leaf, plugin) {
@@ -3195,7 +3339,7 @@ var AnnotationSidebarView = class extends import_obsidian5.ItemView {
     this.freshOpen = true;
     // Toolbar state, kept across re-renders (the panel rebuilds on every change).
     this.searchQuery = "";
-    this.formatFilter = "";
+    this.categoryFilter = "";
   }
   getViewType() {
     return SIDEBAR_VIEW_TYPE;
@@ -3299,10 +3443,14 @@ var AnnotationSidebarView = class extends import_obsidian5.ItemView {
   countLabel(name, shown, total) {
     return shown === total ? `${name} (${shown})` : `${name} (${shown} of ${total})`;
   }
+  // The search box covers both halves of an entry: the note/comment you wrote
+  // AND the annotated text itself (selector.exact), so searching for a phrase
+  // you highlighted finds it even when you never wrote a note about it.
   passesFilters(annotation) {
-    if (this.formatFilter !== "" && filterValue(annotation) !== this.formatFilter) return false;
+    if (this.categoryFilter !== "" && filterValue(annotation) !== this.categoryFilter) return false;
     if (this.searchQuery === "") return true;
-    return annotation.comment.toLowerCase().includes(this.searchQuery);
+    if (annotation.comment.toLowerCase().includes(this.searchQuery)) return true;
+    return annotation.selector.exact.toLowerCase().includes(this.searchQuery);
   }
   // ── Toolbar ──────────────────────────────────────────────────────────────
   renderToolbar(root, annotations) {
@@ -3312,7 +3460,7 @@ var AnnotationSidebarView = class extends import_obsidian5.ItemView {
       cls: "mdann-search-input",
       attr: {
         type: "search",
-        placeholder: "Search notes and comments\u2026",
+        placeholder: "Search text, notes and comments\u2026",
         spellcheck: "false"
       }
     });
@@ -3338,7 +3486,7 @@ var AnnotationSidebarView = class extends import_obsidian5.ItemView {
   }
   renderFilterSelect(row, annotations) {
     const select = row.createEl("select", { cls: "dropdown mdann-filter-select" });
-    select.createEl("option", { text: "All formats", attr: { value: "" } });
+    select.createEl("option", { text: "All categories", attr: { value: "" } });
     const present = /* @__PURE__ */ new Map();
     for (const annotation of annotations) present.set(filterValue(annotation), filterLabel(annotation));
     const entries = [...present.entries()].sort(([a], [b]) => {
@@ -3349,10 +3497,10 @@ var AnnotationSidebarView = class extends import_obsidian5.ItemView {
     for (const [value, label] of entries) {
       select.createEl("option", { text: label, attr: { value } });
     }
-    if (this.formatFilter !== "" && !present.has(this.formatFilter)) this.formatFilter = "";
-    select.value = this.formatFilter;
+    if (this.categoryFilter !== "" && !present.has(this.categoryFilter)) this.categoryFilter = "";
+    select.value = this.categoryFilter;
     select.addEventListener("change", () => {
-      this.formatFilter = select.value;
+      this.categoryFilter = select.value;
       this.render();
     });
   }
@@ -3447,9 +3595,9 @@ var AnnotationSidebarView = class extends import_obsidian5.ItemView {
     const excerpt2 = annotation.selector.exact.length > 120 ? annotation.selector.exact.slice(0, 120) + "\u2026" : annotation.selector.exact;
     const chip = quote.createEl("span", {
       text: isPointComment ? "comment marker" : excerpt2 === "" ? "(empty quote)" : excerpt2,
-      cls: highlightClasses(annotation.type, annotation.format, this.plugin.settings)
+      cls: highlightClasses(annotation.type, annotation.category, this.plugin.settings)
     });
-    chip.setCssProps(highlightStyleVars(annotation.type, annotation.format, this.plugin.settings));
+    chip.setCssProps(highlightStyleVars(annotation.type, annotation.category, this.plugin.settings));
     if (annotation.type === "comment" && (outcome == null ? void 0 : outcome.status) === "matched") {
       head.createEl("span", {
         text: `line ${lineNumberAt(body, outcome.start)}`,
@@ -3460,7 +3608,7 @@ var AnnotationSidebarView = class extends import_obsidian5.ItemView {
       const reason = outcome && outcome.status === "orphaned" && outcome.reason === "ambiguous" ? "Multiple equally likely locations \u2014 select the right text and re-anchor." : "Original text not found \u2014 select the new text and re-anchor.";
       card.createEl("div", { text: reason, cls: "mdann-orphan-reason" });
     }
-    this.renderFormatSelector(card, path, annotation, isOrphan);
+    this.renderCategorySelector(card, path, annotation, isOrphan);
     const comment = card.createEl("textarea", {
       cls: "mdann-comment-input",
       attr: { rows: "2", placeholder: annotation.type === "comment" ? "Comment\u2026" : "Note\u2026" }
@@ -3484,31 +3632,31 @@ var AnnotationSidebarView = class extends import_obsidian5.ItemView {
       });
     }
   }
-  // A format dropdown bound to one annotation, plus (in the same row) the
+  // A category dropdown bound to one annotation, plus (in the same row) the
   // status toggle and delete icon buttons. Comments lead with a "Comment"
-  // option (the dedicated comment style, stored as the empty format name).
-  renderFormatSelector(card, path, annotation, isOrphan) {
-    const row = card.createDiv({ cls: "mdann-format-select-row" });
-    row.createEl("span", { text: "Format", cls: "mdann-format-select-label" });
-    const select = row.createEl("select", { cls: "dropdown mdann-format-select" });
+  // option (the dedicated comment style, stored as the empty category name).
+  renderCategorySelector(card, path, annotation, isOrphan) {
+    const row = card.createDiv({ cls: "mdann-category-select-row" });
+    row.createEl("span", { text: "Category", cls: "mdann-category-select-label" });
+    const select = row.createEl("select", { cls: "dropdown mdann-category-select" });
     if (annotation.type === "comment") {
       const def = select.createEl("option", { text: "Comment", attr: { value: "" } });
-      if (annotation.format === "") def.selected = true;
+      if (annotation.category === "") def.selected = true;
     }
-    const names = Object.keys(this.plugin.settings.formatStyles);
-    if (annotation.format !== "" && !names.includes(annotation.format)) {
+    const names = Object.keys(this.plugin.settings.categoryStyles);
+    if (annotation.category !== "" && !names.includes(annotation.category)) {
       const missing = select.createEl("option", {
-        text: `${annotation.format} (missing)`,
-        attr: { value: annotation.format }
+        text: `${annotation.category} (missing)`,
+        attr: { value: annotation.category }
       });
       missing.selected = true;
     }
     for (const name of names) {
       const option = select.createEl("option", { text: name, attr: { value: name } });
-      if (name === annotation.format) option.selected = true;
+      if (name === annotation.category) option.selected = true;
     }
     select.addEventListener("change", () => {
-      this.plugin.setFormat(path, annotation.id, select.value);
+      this.plugin.setCategory(path, annotation.id, select.value);
     });
     if (!isOrphan) {
       const statusBtn = row.createEl("button", {
@@ -3606,16 +3754,18 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
     // annotations first loaded (fixes formatting not appearing until a toggle).
     this.initialRendered = /* @__PURE__ */ new Set();
     this.syncTimer = null;
-    // Format names that currently have a generated "Apply - <name>" command, so
-    // syncFormatCommands can diff against settings and add/remove as they change.
-    this.formatCommandNames = /* @__PURE__ */ new Set();
+    // Category names that currently have a generated "Apply - <name>" command,
+    // so syncCategoryCommands can diff against settings and add/remove as they
+    // change.
+    this.categoryCommandNames = /* @__PURE__ */ new Set();
   }
   async onload() {
     this.settings = normalizeSettings(await this.loadData());
-    this.api = createApi(this.app.vault, () => Object.keys(this.settings.formatStyles));
+    this.api = createApi(this.app.vault, () => Object.keys(this.settings.categoryStyles));
     this.queue = new WriteQueue(
       {
         process: async (path, mutate) => {
+          if (this.applyThroughEditor(path, mutate)) return;
           const file = this.app.vault.getFileByPath(path);
           if (!file) return;
           await this.app.vault.process(file, mutate);
@@ -3687,24 +3837,50 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
       }
     });
     this.addCommand({
+      // Command ids are what user hotkeys bind to, so they keep their
+      // pre-1.0.20 spelling even though the visible names now say "colors".
       id: "toggle-annotation-formats",
-      name: "Show/hide annotation formats",
+      name: "Show/hide annotation colors",
       callback: () => {
         this.settings.annotationFormattingEnabled = !this.settings.annotationFormattingEnabled;
         void this.saveSettings();
         new import_obsidian6.Notice(
-          `Annotation formats ${this.settings.annotationFormattingEnabled ? "shown" : "hidden"}`
+          `Annotation colors ${this.settings.annotationFormattingEnabled ? "shown" : "hidden"}`
         );
       }
     });
     this.addCommand({
       id: "toggle-comment-formats",
-      name: "Show/hide comment formats",
+      name: "Show/hide comment colors",
       callback: () => {
         this.settings.commentsFormattingEnabled = !this.settings.commentsFormattingEnabled;
         void this.saveSettings();
         new import_obsidian6.Notice(
-          `Comment formats ${this.settings.commentsFormattingEnabled ? "shown" : "hidden"}`
+          `Comment colors ${this.settings.commentsFormattingEnabled ? "shown" : "hidden"}`
+        );
+      }
+    });
+    this.addCommand({
+      id: "toggle-annotation-block",
+      name: "Show/hide the annotation block",
+      icon: "code",
+      callback: () => {
+        this.settings.hideAnnotationBlock = !this.settings.hideAnnotationBlock;
+        void this.saveSettings();
+        new import_obsidian6.Notice(
+          `Annotation block ${this.settings.hideAnnotationBlock ? "hidden" : "shown"}`
+        );
+      }
+    });
+    this.addCommand({
+      id: "toggle-body-end-line",
+      name: "Show/hide the end-of-text line",
+      icon: "minus",
+      callback: () => {
+        this.settings.bodyEndLineEnabled = !this.settings.bodyEndLineEnabled;
+        void this.saveSettings();
+        new import_obsidian6.Notice(
+          `End-of-text line ${this.settings.bodyEndLineEnabled ? "shown" : "hidden"}`
         );
       }
     });
@@ -3732,7 +3908,7 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
         );
       }
     });
-    this.syncFormatCommands();
+    this.syncCategoryCommands();
     this.registerEvent(
       this.app.workspace.on("editor-menu", (menu, editor, ctx) => {
         const hasSelection = editor.getSelection() !== "";
@@ -3815,52 +3991,52 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
   async saveSettings() {
     var _a;
     await this.saveData(this.settings);
-    this.syncFormatCommands();
+    this.syncCategoryCommands();
     for (const view of this.editors) this.decorate(view);
     this.rerenderPreviews();
     (_a = this.toolbarHighlighter) == null ? void 0 : _a.refresh();
     this.notifyChange();
   }
-  // ── Per-format commands ("Apply - <name>", one per format) ───────────────
+  // ── Per-category commands ("Apply - <name>", one per category) ───────────
   //
-  // Registered dynamically so a format added in the settings tab immediately
+  // Registered dynamically so a category added in the settings tab immediately
   // gains its own command — which also lets a Note Toolbar JavaScript item
-  // build a live "apply format" menu via ntb.menu() (see README). Removed or
-  // renamed formats have their stale command torn down. addCommand prefixes
+  // build a live "apply category" menu via ntb.menu() (see README). Removed or
+  // renamed categories have their stale command torn down. addCommand prefixes
   // the id with the plugin id; removeCommand needs that full prefixed id.
-  formatCommandId(formatName) {
-    return `apply-${formatName}`;
+  categoryCommandId(categoryName) {
+    return `apply-${categoryName}`;
   }
-  syncFormatCommands() {
-    const current = new Set(Object.keys(this.settings.formatStyles));
+  syncCategoryCommands() {
+    const current = new Set(Object.keys(this.settings.categoryStyles));
     for (const name of current) {
-      if (this.formatCommandNames.has(name)) continue;
+      if (this.categoryCommandNames.has(name)) continue;
       this.addCommand({
-        id: this.formatCommandId(name),
+        id: this.categoryCommandId(name),
         name: `Apply - ${name}`,
         icon: "highlighter",
         editorCheckCallback: (checking, editor, ctx) => {
-          if (!this.settings.formatStyles[name]) return false;
+          if (!this.settings.categoryStyles[name]) return false;
           if (checking) return true;
-          this.applyNamedFormat(editor, ctx, name);
+          this.applyNamedCategory(editor, ctx, name);
           return true;
         }
       });
-      this.formatCommandNames.add(name);
+      this.categoryCommandNames.add(name);
     }
-    for (const name of [...this.formatCommandNames]) {
+    for (const name of [...this.categoryCommandNames]) {
       if (current.has(name)) continue;
-      this.removeCommand(`${this.manifest.id}:${this.formatCommandId(name)}`);
-      this.formatCommandNames.delete(name);
+      this.removeCommand(`${this.manifest.id}:${this.categoryCommandId(name)}`);
+      this.categoryCommandNames.delete(name);
     }
   }
-  // Selection → highlight with this format; bare cursor → comment carrying it
-  // (the marker then renders in that format's color).
-  applyNamedFormat(editor, ctx, formatName) {
+  // Selection → highlight with this category; bare cursor → comment carrying it
+  // (the marker then renders in that category's color).
+  applyNamedCategory(editor, ctx, categoryName) {
     const from = editor.posToOffset(editor.getCursor("from"));
     const to = editor.posToOffset(editor.getCursor("to"));
     const type = from === to ? "comment" : "highlight";
-    this.addAnnotationFromEditor(editor, ctx, type, formatName);
+    this.addAnnotationFromEditor(editor, ctx, type, categoryName);
   }
   // ── Per-file state ───────────────────────────────────────────────────────
   getState(path) {
@@ -3895,6 +4071,9 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
   // and cache the result.
   setStateFromDoc(path, doc) {
     const parsed = parseDocument(doc);
+    if (parsed.legacyCategoryKey) {
+      this.queue.request(path, (text) => normalizeBlock(text));
+    }
     const outcomes = resolveSelectors(
       parsed.body,
       parsed.annotations.map((a) => ({ id: a.id, selector: a.selector }))
@@ -3939,6 +4118,41 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
         })();
       }, DISK_REFRESH_DEBOUNCE_MS)
     );
+  }
+  // Apply one queued block edit through the editor that has `path` open,
+  // returning false when no editing view holds it (the caller then writes to
+  // the vault as before). `this.editors` only ever holds real note editors —
+  // Reading-view-only leaves are absent, and embedded table-cell views are
+  // detached — so falling through is exactly the "nobody is editing this"
+  // case where a disk write is safe.
+  //
+  // Two details keep the edit invisible: only the stretch that actually
+  // changed is replaced (every mutation here rewrites the end-of-file block,
+  // so the diff is a tail edit and the cursor/selection upstream of it never
+  // moves), and the transaction is kept out of the undo history — the user
+  // did not ask for a selector refresh, so ⌘Z must still undo their typing.
+  applyThroughEditor(path, mutate) {
+    for (const view of this.editors) {
+      if (editorViewPath(view) !== path) continue;
+      const current = view.state.doc.toString();
+      const next = mutate(current);
+      if (next === current) return true;
+      let start = 0;
+      const shortest = Math.min(current.length, next.length);
+      while (start < shortest && current[start] === next[start]) start++;
+      let endCurrent = current.length;
+      let endNext = next.length;
+      while (endCurrent > start && endNext > start && current[endCurrent - 1] === next[endNext - 1]) {
+        endCurrent--;
+        endNext--;
+      }
+      view.dispatch({
+        changes: { from: start, to: endCurrent, insert: next.slice(start, endNext) },
+        annotations: import_state2.Transaction.addToHistory.of(false)
+      });
+      return true;
+    }
+    return false;
   }
   // ── Editor attachment (called by the CodeMirror ViewPlugin) ──────────────
   attachEditor(view) {
@@ -4058,7 +4272,7 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
     }
   }
   // ── Annotation CRUD (used by commands and the sidebar) ───────────────────
-  // Selection → annotation (highlight, format picked when several exist);
+  // Selection → annotation (highlight, category picked when several exist);
   // no selection → comment marker at the cursor.
   annotateOrComment(editor, ctx) {
     const from = editor.posToOffset(editor.getCursor("from"));
@@ -4067,21 +4281,21 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
       this.addAnnotationFromEditor(editor, ctx, "comment", "");
       return;
     }
-    const names = usableFormatNames(this.settings);
+    const names = usableCategoryNames(this.settings);
     const first = names[0];
     if (names.length === 0) {
-      new import_obsidian6.Notice("No annotation formats are enabled \u2014 check the plugin settings");
+      new import_obsidian6.Notice("No annotation categories are enabled \u2014 check the plugin settings");
       return;
     }
     if (names.length === 1 && first !== void 0) {
       this.addAnnotationFromEditor(editor, ctx, "highlight", first);
       return;
     }
-    new FormatSuggestModal(this.app, names, (name) => {
+    new CategorySuggestModal(this.app, names, (name) => {
       this.addAnnotationFromEditor(editor, ctx, "highlight", name);
     }).open();
   }
-  addAnnotationFromEditor(editor, ctx, type, formatName) {
+  addAnnotationFromEditor(editor, ctx, type, categoryName) {
     var _a;
     const path = (_a = ctx.file) == null ? void 0 : _a.path;
     if (path === void 0) return;
@@ -4105,7 +4319,7 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
     const annotation = createAnnotation({
       id: generateAnnotationId(Date.now(), Math.random()),
       type,
-      format: formatName,
+      category: categoryName,
       selector,
       comment: "",
       author: this.settings.author,
@@ -4138,19 +4352,19 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
       dateModified: now
     });
   }
-  // Reassign one annotation to a different format (sidebar dropdown).
-  setFormat(path, id, formatName) {
+  // Reassign one annotation to a different category (sidebar dropdown).
+  setCategory(path, id, categoryName) {
     this.patchAnnotation(path, id, {
-      format: formatName,
+      category: categoryName,
       dateModified: formatTimestamp(Date.now())
     });
     this.decorateAllFor(path);
     this.rerenderPreviews();
   }
-  // Rename a format in settings AND rewrite the "format" field in every
+  // Rename a category in settings AND rewrite the "category" field in every
   // annotated note that references the old name (they store the name).
-  async renameFormat(oldName, newName) {
-    const styles = this.settings.formatStyles;
+  async renameCategory(oldName, newName) {
+    const styles = this.settings.categoryStyles;
     const current = styles[oldName];
     if (!current) return false;
     if (newName === "" || isUnsafeKey(newName) || styles[newName]) return false;
@@ -4158,26 +4372,26 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
     for (const [key, value] of Object.entries(styles)) {
       next[key === oldName ? newName : key] = value;
     }
-    this.settings.formatStyles = next;
+    this.settings.categoryStyles = next;
     await this.saveSettings();
     let fileCount = 0;
     for (const file of this.app.vault.getMarkdownFiles()) {
       const doc = await this.app.vault.cachedRead(file);
       if (!doc.includes(BLOCK_OPEN)) continue;
       const { annotations } = parseDocument(doc);
-      if (!annotations.some((a) => a.format === oldName)) continue;
-      this.queue.request(file.path, (text) => renameAnnotationFormat(text, oldName, newName));
+      if (!annotations.some((a) => a.category === oldName)) continue;
+      this.queue.request(file.path, (text) => renameAnnotationCategory(text, oldName, newName));
       fileCount++;
       const state = this.states.get(file.path);
       if (state) {
         for (const a of state.annotations) {
-          if (a.format === oldName) a.format = newName;
+          if (a.category === oldName) a.category = newName;
         }
       }
     }
     if (fileCount > 0) {
       new import_obsidian6.Notice(
-        `MD Annotation: renamed format in ${fileCount} note${fileCount === 1 ? "" : "s"}`
+        `MD Annotation: renamed category in ${fileCount} note${fileCount === 1 ? "" : "s"}`
       );
       this.notifyChange();
     }

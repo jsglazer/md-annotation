@@ -1,5 +1,5 @@
 // Settings tab, replicating annotation-manager's layout minus everything
-// bracket-related: General / Annotations / Comments tabs, a per-format grid
+// bracket-related: General / Annotations / Comments tabs, a per-category grid
 // (Use toggle, editable name, Fr/Bg color cells with enable checkboxes per
 // light/dark theme, font size, live sample text, delete-with-confirm), and
 // the dedicated comment style grid. All persisted values are normalized by
@@ -20,13 +20,13 @@ import {
 	GUTTER_MAX_WIDTH,
 	GUTTER_MIN_WIDTH,
 	clampGutterWidth,
-	exportFormats,
+	exportCategories,
 	isUnsafeKey,
 	isValidFontSize,
-	makeFormatStyle,
-	mergeFormats,
+	makeCategoryStyle,
+	mergeCategories,
 	normalizeHex,
-	parseFormatsImport,
+	parseCategoriesImport,
 } from './core/settings';
 import type MdAnnotationPlugin from './main';
 import {
@@ -50,11 +50,11 @@ function enabledColor(opt: ColorOption): string {
 }
 
 export class MdAnnotationSettingTab extends PluginSettingTab {
-	private pendingFormatName = '';
+	private pendingCategoryName = '';
 	private activeTab: TabId = 'general';
 	private saveTimer: number | null = null;
-	// A redraw triggered by an in-tab control (renaming a format, picking a
-	// toolbar item, importing formats…) should leave the scroll position alone
+	// A redraw triggered by an in-tab control (renaming a category, picking a
+	// toolbar item, importing categories…) should leave the scroll position alone
 	// — display() rebuilds the whole pane from scratch, which would otherwise
 	// snap it back to the top every time. Only an explicit tab-bar click resets
 	// it, since that is a real navigation to different content.
@@ -155,8 +155,9 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 			);
 
 		this.renderNavigationSection(containerEl);
+		this.renderNoteLayoutSection(containerEl);
 		this.renderOrphanSection(containerEl);
-		this.renderFormatTransferSection(containerEl);
+		this.renderCategoryTransferSection(containerEl);
 	}
 
 	// ── Gutter tab ───────────────────────────────────────────────────────────
@@ -335,7 +336,7 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 			});
 	}
 
-	// The two colour rows, laid out like the format grid so Fr/Bg per theme
+	// The two colour rows, laid out like the category grid so Fr/Bg per theme
 	// read the same way here as everywhere else in these settings.
 	private renderToolbarHighlightGrid(containerEl: HTMLElement): void {
 		const wrap = containerEl.createDiv('mdann-grid-wrap');
@@ -416,11 +417,11 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 			);
 	}
 
-	// Font size for one type's gutter cards. Separate from a format's own Size
+	// Font size for one type's gutter cards. Separate from a category's own Size
 	// column (Annotations/Comments tabs) — that one styles the in-text highlight
 	// and the sidebar quote chip; this one styles only the gutter card, on
 	// either editor or Reading-view gutters. Same free-text validation as the
-	// per-format field: a plain CSS length or bare keyword, reverting on blur
+	// per-category field: a plain CSS length or bare keyword, reverting on blur
 	// otherwise.
 	private renderGutterFontSize(
 		containerEl: HTMLElement,
@@ -481,6 +482,58 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 		);
 	}
 
+	// What the note itself looks like around the annotation data: whether the
+	// storage block at the foot of the file is visible at all, and whether the
+	// end of the body text is marked with a rule.
+	private renderNoteLayoutSection(containerEl: HTMLElement): void {
+		new Setting(containerEl).setName('Note layout').setHeading();
+
+		this.renderToggle(
+			containerEl,
+			'Hide the annotation block',
+			'Collapse the %%md-annotation block at the foot of the note in Live Preview and Source mode, so its JSON stops competing with your text (also toggled by the "Show/hide the annotation block" command). Reading view never shows it. The block is only hidden from view — it is still there, and still written to.',
+			() => this.plugin.settings.hideAnnotationBlock,
+			(v) => {
+				this.plugin.settings.hideAnnotationBlock = v;
+			},
+		);
+
+		this.renderToggle(
+			containerEl,
+			'Show a line at the end of the text',
+			'Draw a rule under the last line of body text, so the note has a visible bottom edge once the annotation block is hidden (also toggled by the "Show/hide the end-of-text line" command)',
+			() => this.plugin.settings.bodyEndLineEnabled,
+			(v) => {
+				this.plugin.settings.bodyEndLineEnabled = v;
+			},
+		);
+
+		containerEl.createEl('p', {
+			text:
+				'Colour of that rule, per theme. Uncheck a theme to fall back to whatever ' +
+				'divider colour the theme itself uses.',
+			cls: 'setting-item-description',
+		});
+		this.renderEndLineColors(containerEl);
+	}
+
+	// The rule's two colours, laid out like the other colour grids (checkbox,
+	// swatch, hex) but with one column per theme — a line has no Fr/Bg pair.
+	private renderEndLineColors(containerEl: HTMLElement): void {
+		const wrap = containerEl.createDiv('mdann-grid-wrap');
+		const table = wrap.createEl('table', { cls: 'mdann-grid-table' });
+		const thead = table.createEl('thead');
+		const hr = thead.createEl('tr');
+		hr.createEl('th', { text: 'Light' });
+		hr.createEl('th', { text: 'Dark', cls: 'mdann-grid-sep' });
+
+		const tr = table.createEl('tbody').createEl('tr');
+		for (const theme of ['light', 'dark'] as const) {
+			const td = tr.createEl('td', { cls: theme === 'dark' ? 'mdann-grid-sep' : '' });
+			this.renderColorCell(td, this.plugin.settings.bodyEndLineColor[theme], () => undefined);
+		}
+	}
+
 	// An annotation whose text was edited beyond recognition is orphaned rather
 	// than guessed at. The sidebar's "Fix orphans" button searches again at a
 	// lower bar; this makes that pass automatic.
@@ -508,29 +561,30 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 		);
 	}
 
-	// Formats are stored in this vault's own data.json. Obsidian Sync replicates
-	// a vault to itself on other devices — it never bridges two different vaults
-	// — so moving formats between vaults is an explicit copy/paste.
-	private renderFormatTransferSection(containerEl: HTMLElement): void {
-		new Setting(containerEl).setName('Share formats between vaults').setHeading();
+	// Categories are stored in this vault's own data.json. Obsidian Sync
+	// replicates a vault to itself on other devices — it never bridges two
+	// different vaults — so moving categories between vaults is an explicit
+	// copy/paste.
+	private renderCategoryTransferSection(containerEl: HTMLElement): void {
+		new Setting(containerEl).setName('Share categories between vaults').setHeading();
 		containerEl.createEl('p', {
 			text:
-				'Formats live in this vault only. Obsidian Sync copies a vault to your other ' +
-				'devices, not to your other vaults, so formats added in one vault never appear ' +
-				'in another. Export them here and import the result in the other vault.',
+				'Categories live in this vault only. Obsidian Sync copies a vault to your other ' +
+				'devices, not to your other vaults, so categories added in one vault never ' +
+				'appear in another. Export them here and import the result in the other vault.',
 			cls: 'setting-item-description',
 		});
 
 		new Setting(containerEl)
-			.setName('Export formats')
-			.setDesc('Copy every format (and the comment style) to the clipboard as JSON')
+			.setName('Export categories')
+			.setDesc('Copy every category (and the comment style) to the clipboard as JSON')
 			.addButton((btn) =>
 				btn.setButtonText('Copy to clipboard').onClick(() => {
-					const json = exportFormats(this.plugin.settings);
+					const json = exportCategories(this.plugin.settings);
 					void navigator.clipboard.writeText(json).then(
 						() => {
-							const count = Object.keys(this.plugin.settings.formatStyles).length;
-							new Notice(`Copied ${count} format${count === 1 ? '' : 's'} to the clipboard`);
+							const count = Object.keys(this.plugin.settings.categoryStyles).length;
+							new Notice(`Copied ${count} category${count === 1 ? '' : 'ies'} to the clipboard`);
 						},
 						() => new Notice('Could not write to the clipboard'),
 					);
@@ -538,26 +592,26 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName('Import formats')
-			.setDesc('Paste an exported payload to add its formats to this vault')
+			.setName('Import categories')
+			.setDesc('Paste an exported payload to add its categories to this vault')
 			.addButton((btn) =>
 				btn
 					.setButtonText('Paste and import')
 					.setCta()
 					.onClick(() => {
-						new ImportFormatsModal(this.app, (text, mode) => this.importFormats(text, mode)).open();
+						new ImportCategoriesModal(this.app, (text, mode) => this.importCategories(text, mode)).open();
 					}),
 			);
 	}
 
 	// Returns an outcome message for the modal; null means the import ran and
 	// the modal can close.
-	private importFormats(text: string, mode: 'merge' | 'replace'): string | null {
-		const parsed = parseFormatsImport(text);
-		if (!parsed) return 'That does not look like an exported format payload.';
+	private importCategories(text: string, mode: 'merge' | 'replace'): string | null {
+		const parsed = parseCategoriesImport(text);
+		if (!parsed) return 'That does not look like an exported category payload.';
 
-		const result = mergeFormats(this.plugin.settings.formatStyles, parsed.formatStyles, mode);
-		this.plugin.settings.formatStyles = result.formatStyles;
+		const result = mergeCategories(this.plugin.settings.categoryStyles, parsed.categoryStyles, mode);
+		this.plugin.settings.categoryStyles = result.categoryStyles;
 		if (parsed.commentStyle) this.plugin.settings.commentStyle = parsed.commentStyle;
 
 		void this.saveAndRefresh().then(() => this.display());
@@ -566,8 +620,8 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 		const skipped = result.skipped.length;
 		new Notice(
 			mode === 'replace'
-				? `Replaced formats with ${added} imported format${added === 1 ? '' : 's'}`
-				: `Imported ${added} format${added === 1 ? '' : 's'}` +
+				? `Replaced categories with ${added} imported categor${added === 1 ? 'y' : 'ies'}`
+				: `Imported ${added} categor${added === 1 ? 'y' : 'ies'}` +
 					(skipped > 0 ? `, kept ${skipped} already here` : ''),
 		);
 		return null;
@@ -580,8 +634,8 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 		new Setting(containerEl).setName('Annotation Visibility').setHeading();
 		this.renderToggle(
 			containerEl,
-			'Annotation formatting',
-			'Apply format colors to annotated text (also toggled by the "Show/hide annotation formats" command)',
+			'Annotation colors',
+			'Apply category colors to annotated text (also toggled by the "Show/hide annotation colors" command)',
 			() => this.plugin.settings.annotationFormattingEnabled,
 			(v) => {
 				this.plugin.settings.annotationFormattingEnabled = v;
@@ -595,24 +649,24 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 		});
 
 		// eslint-disable-next-line obsidianmd/ui/sentence-case -- heading text specified by design
-		new Setting(containerEl).setName('Annotation Formats').setHeading();
+		new Setting(containerEl).setName('Annotation Categories').setHeading();
 		containerEl.createEl('p', {
 			text:
-				'Per-format colors for annotations. Fr = text color, Bg = background. ' +
+				'Per-category colors for annotations. Fr = text color, Bg = background. ' +
 				'Each checkbox controls whether that color is applied. Uncheck Use to disable ' +
-				'a row without deleting it. Renaming a format also updates every note that ' +
+				'a row without deleting it. Renaming a category also updates every note that ' +
 				'references the old name.',
 			cls: 'setting-item-description',
 		});
 
-		this.renderFormatGrid(containerEl);
+		this.renderCategoryGrid(containerEl);
 
 		new Setting(containerEl)
-			.setName('Add format')
-			.setDesc('Name shown in the format picker and stored on each annotation')
+			.setName('Add category')
+			.setDesc('Name shown in the category picker and stored on each annotation')
 			.addText((text) =>
 				text.setPlaceholder('Key').onChange((v) => {
-					this.pendingFormatName = v.trim();
+					this.pendingCategoryName = v.trim();
 				}),
 			)
 			.addButton((btn) =>
@@ -620,20 +674,20 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 					.setButtonText('Add')
 					.setCta()
 					.onClick(async () => {
-						const name = this.pendingFormatName;
-						if (!name || isUnsafeKey(name) || this.plugin.settings.formatStyles[name]) return;
-						this.plugin.settings.formatStyles[name] = makeFormatStyle();
+						const name = this.pendingCategoryName;
+						if (!name || isUnsafeKey(name) || this.plugin.settings.categoryStyles[name]) return;
+						this.plugin.settings.categoryStyles[name] = makeCategoryStyle();
 						await this.saveAndRefresh();
 						this.display();
 					}),
 			);
 	}
 
-	private renderFormatGrid(containerEl: HTMLElement): void {
-		const names = Object.keys(this.plugin.settings.formatStyles).sort();
+	private renderCategoryGrid(containerEl: HTMLElement): void {
+		const names = Object.keys(this.plugin.settings.categoryStyles).sort();
 		if (names.length === 0) {
 			containerEl.createEl('p', {
-				text: 'No formats configured yet — add one below.',
+				text: 'No categories configured yet — add one below.',
 				cls: 'setting-item-description',
 			});
 			return;
@@ -661,11 +715,11 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 		}
 
 		const tbody = table.createEl('tbody');
-		for (const name of names) this.renderFormatRow(tbody, name);
+		for (const name of names) this.renderCategoryRow(tbody, name);
 	}
 
-	private renderFormatRow(tbody: HTMLElement, name: string): void {
-		const style = this.plugin.settings.formatStyles[name];
+	private renderCategoryRow(tbody: HTMLElement, name: string): void {
+		const style = this.plugin.settings.categoryStyles[name];
 		if (!style) return;
 
 		const tr = tbody.createEl('tr');
@@ -683,11 +737,11 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 			void this.saveAndRefresh();
 		});
 
-		this.renderFormatNameCell(tr, name);
+		this.renderCategoryNameCell(tr, name);
 
 		let exampleTd: HTMLElement | null = null;
 		const refreshExample = () => {
-			if (exampleTd) this.renderFormatExample(exampleTd, name);
+			if (exampleTd) this.renderCategoryExample(exampleTd, name);
 		};
 
 		for (const theme of ['light', 'dark'] as const) {
@@ -715,22 +769,22 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 		const delTd = tr.createEl('td');
 		const delBtn = delTd.createEl('button', { text: 'Del', cls: 'mdann-grid-del' });
 		delBtn.addEventListener('click', () => {
-			if (Object.keys(this.plugin.settings.formatStyles).length <= 1) {
-				new Notice('At least one format must remain');
+			if (Object.keys(this.plugin.settings.categoryStyles).length <= 1) {
+				new Notice('At least one category must remain');
 				return;
 			}
-			new ConfirmModal(this.app, `Delete the format "${name}"? This cannot be undone.`, () => {
-				delete this.plugin.settings.formatStyles[name];
+			new ConfirmModal(this.app, `Delete the category "${name}"? This cannot be undone.`, () => {
+				delete this.plugin.settings.categoryStyles[name];
 				void this.saveAndRefresh().then(() => this.display());
 			}).open();
 		});
 	}
 
-	// Editable name cell: renaming a format moves its style to the new key AND
-	// rewrites the stored name in every annotated note (plugin.renameFormat).
+	// Editable name cell: renaming a category moves its style to the new key AND
+	// rewrites the stored name in every annotated note (plugin.renameCategory).
 	// Validates against blanks, prototype-unsafe keys, and existing names; on
 	// a bad name the input reverts to the original and a Notice explains why.
-	private renderFormatNameCell(tr: HTMLElement, name: string): void {
+	private renderCategoryNameCell(tr: HTMLElement, name: string): void {
 		const td = tr.createEl('td', { cls: 'mdann-grid-name' });
 		const input = td.createEl('input', {
 			cls: 'mdann-grid-name-input',
@@ -744,19 +798,19 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 				input.value = name;
 				return;
 			}
-			const styles = this.plugin.settings.formatStyles;
+			const styles = this.plugin.settings.categoryStyles;
 			if (!next || isUnsafeKey(next) || styles[next]) {
 				new Notice(
 					!next
-						? 'Format name cannot be empty'
+						? 'Category name cannot be empty'
 						: styles[next]
-							? `Format "${next}" already exists`
-							: `"${next}" is not a valid format name`,
+							? `Category "${next}" already exists`
+							: `"${next}" is not a valid category name`,
 				);
 				input.value = name;
 				return;
 			}
-			void this.plugin.renameFormat(name, next).then((ok) => {
+			void this.plugin.renameCategory(name, next).then((ok) => {
 				if (!ok) input.value = name;
 				this.display();
 			});
@@ -774,9 +828,9 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 		});
 	}
 
-	private renderFormatExample(td: HTMLElement, name: string): void {
+	private renderCategoryExample(td: HTMLElement, name: string): void {
 		td.empty();
-		const style = this.plugin.settings.formatStyles[name];
+		const style = this.plugin.settings.categoryStyles[name];
 		if (!style) return;
 		const theme = this.isDarkTheme() ? 'dark' : 'light';
 		this.appendExampleSpan(
@@ -888,8 +942,8 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 		);
 		this.renderToggle(
 			containerEl,
-			'Comment formatting',
-			'Apply the comment colors to markers (also toggled by the "Show/hide comment formats" command)',
+			'Comment colors',
+			'Apply the comment colors to markers (also toggled by the "Show/hide comment colors" command)',
 			() => this.plugin.settings.commentsFormattingEnabled,
 			(v) => {
 				this.plugin.settings.commentsFormattingEnabled = v;
@@ -902,7 +956,7 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 			cls: 'setting-item-description',
 		});
 
-		new Setting(containerEl).setName('Comment format').setHeading();
+		new Setting(containerEl).setName('Comment category').setHeading();
 		containerEl.createEl('p', {
 			text:
 				'Colors for comment markers (comments are added with no text selected and ' +
@@ -977,10 +1031,10 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 	}
 }
 
-// Paste target for an exported format payload. Merge adds only names this
-// vault does not already have (never touching a format you have tuned here);
+// Paste target for an exported category payload. Merge adds only names this
+// vault does not already have (never touching a category you have tuned here);
 // Replace swaps the whole set, so it is confirmed separately.
-class ImportFormatsModal extends Modal {
+class ImportCategoriesModal extends Modal {
 	constructor(
 		app: App,
 		private onImport: (text: string, mode: 'merge' | 'replace') => string | null,
@@ -989,7 +1043,7 @@ class ImportFormatsModal extends Modal {
 	}
 
 	onOpen(): void {
-		this.contentEl.createEl('h3', { text: 'Import formats' });
+		this.contentEl.createEl('h3', { text: 'Import categories' });
 		this.contentEl.createEl('p', {
 			text: 'Paste the JSON copied by the export button in the other vault.',
 			cls: 'setting-item-description',
@@ -997,7 +1051,7 @@ class ImportFormatsModal extends Modal {
 
 		const input = this.contentEl.createEl('textarea', {
 			cls: 'mdann-import-input',
-			attr: { rows: '10', placeholder: '{ "version": 1, "formatStyles": { … } }', spellcheck: 'false' },
+			attr: { rows: '10', placeholder: '{ "version": 1, "categoryStyles": { … } }', spellcheck: 'false' },
 		});
 		const error = this.contentEl.createEl('p', { cls: 'mdann-import-error' });
 
@@ -1018,7 +1072,7 @@ class ImportFormatsModal extends Modal {
 		replaceBtn.addEventListener('click', () => {
 			new ConfirmModal(
 				this.app,
-				'Replace every format in this vault with the imported ones? Annotations using a format that is not in the payload will fall back to the first enabled format until you reassign them.',
+				'Replace every category in this vault with the imported ones? Annotations using a category that is not in the payload will fall back to the first enabled category until you reassign them.',
 				() => run('replace'),
 				'Replace all',
 			).open();
@@ -1036,7 +1090,7 @@ class ImportFormatsModal extends Modal {
 }
 
 // Simple Yes/No confirmation modal, used before destructive actions like
-// deleting a format's configured style.
+// deleting a category's configured style.
 class ConfirmModal extends Modal {
 	constructor(
 		app: App,

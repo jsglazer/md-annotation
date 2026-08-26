@@ -17,9 +17,10 @@ export type AnnotationStatus = 'open' | 'closed';
 export interface Annotation {
 	id: string;
 	type: AnnotationType;
-	// AnnotationFormat.id from settings; '' means "the dedicated comment
-	// format" for type 'comment'.
-	format: string;
+	// Category name from settings; '' means "the dedicated comment category"
+	// for type 'comment'. Stored as the JSON key "category" since v1.0.20;
+	// blocks written before that used "format" and are read transparently.
+	category: string;
 	selector: TextQuoteSelector;
 	comment: string;
 	author: string;
@@ -48,6 +49,9 @@ export function isTextQuoteSelector(v: unknown): v is TextQuoteSelector {
 export const ANNOTATION_KNOWN_KEYS = [
 	'id',
 	'type',
+	'category',
+	// Legacy alias for 'category' (pre-1.0.20). Listed as known so an old line
+	// never round-trips its category into `extras` as well.
 	'format',
 	'selector',
 	'comment',
@@ -64,7 +68,10 @@ export function parseAnnotationValue(v: unknown): Annotation | null {
 	if (!isRecord(v)) return null;
 	if (typeof v.id !== 'string' || v.id === '') return null;
 	if (v.type !== 'highlight' && v.type !== 'comment') return null;
-	if (typeof v.format !== 'string') return null;
+	// 'category' since v1.0.20; 'format' is the pre-1.0.20 spelling of the same
+	// field, accepted on read so existing notes keep working untouched.
+	const category = typeof v.category === 'string' ? v.category : v.format;
+	if (typeof category !== 'string') return null;
 	if (!isTextQuoteSelector(v.selector)) return null;
 	if (typeof v.comment !== 'string') return null;
 	if (typeof v.author !== 'string') return null;
@@ -84,7 +91,7 @@ export function parseAnnotationValue(v: unknown): Annotation | null {
 	const annotation: Annotation = {
 		id: v.id,
 		type: v.type,
-		format: v.format,
+		category,
 		selector: {
 			exact: v.selector.exact,
 			prefix: v.selector.prefix,

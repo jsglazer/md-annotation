@@ -4,6 +4,7 @@
 
 import type { App, Editor, MarkdownFileInfo, TFile } from 'obsidian';
 import { MarkdownView, Notice, Plugin } from 'obsidian';
+import { Transaction } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
 
 import type { MdAnnotationAPI } from './api';
@@ -13,8 +14,9 @@ import {
 	BLOCK_OPEN,
 	parseDocument,
 	removeAnnotation,
+	normalizeBlock,
 	removeUnparseableLine,
-	renameAnnotationFormat,
+	renameAnnotationCategory,
 	updateAnnotation,
 	upsertAnnotation,
 } from './core/block';
@@ -23,7 +25,7 @@ import { captureSelector, repairSelector, resolveSelectors } from './core/matche
 import { nearestAnnotationId } from './core/ordering';
 import { WriteQueue } from './core/queue';
 import type { MdAnnotationSettings } from './core/settings';
-import { isUnsafeKey, normalizeSettings, usableFormatNames } from './core/settings';
+import { isUnsafeKey, normalizeSettings, usableCategoryNames } from './core/settings';
 import type { Annotation, AnnotationType, TextQuoteSelector } from './core/types';
 import { EditorGutter } from './editor/gutterLayer';
 import {
@@ -36,7 +38,7 @@ import { ReadingGutter } from './editor/readingGutter';
 import { createReadingPostProcessor, sweepHighlightSpans } from './editor/readingView';
 import { MdAnnotationSettingTab } from './settingsTab';
 import type { FileAnnotationState } from './state';
-import { FormatSuggestModal } from './ui/formatSuggest';
+import { CategorySuggestModal } from './ui/categorySuggest';
 import { AnnotationSidebarView, SIDEBAR_VIEW_TYPE } from './ui/sidebar';
 import { ToolbarHighlighter } from './ui/toolbarHighlight';
 
@@ -84,17 +86,25 @@ export default class MdAnnotationPlugin extends Plugin {
 	// annotations first loaded (fixes formatting not appearing until a toggle).
 	private initialRendered = new Set<string>();
 	private syncTimer: number | null = null;
-	// Format names that currently have a generated "Apply - <name>" command, so
-	// syncFormatCommands can diff against settings and add/remove as they change.
-	private formatCommandNames = new Set<string>();
+	// Category names that currently have a generated "Apply - <name>" command,
+	// so syncCategoryCommands can diff against settings and add/remove as they
+	// change.
+	private categoryCommandNames = new Set<string>();
 
 	async onload(): Promise<void> {
 		this.settings = normalizeSettings(await this.loadData());
-		this.api = createApi(this.app.vault, () => Object.keys(this.settings.formatStyles));
+		this.api = createApi(this.app.vault, () => Object.keys(this.settings.categoryStyles));
 
 		this.queue = new WriteQueue(
 			{
 				process: async (path, mutate) => {
+					// An editor that has the note open owns its text: writing to
+					// disk underneath it is what makes Obsidian announce "File
+					// modified externally, merging changes automatically" every
+					// time a selector self-heals while you type near an
+					// annotation. Applying the same edit through that editor is
+					// the same result with nothing to merge.
+					if (this.applyThroughEditor(path, mutate)) return;
 					const file = this.app.vault.getFileByPath(path);
 					if (!file) return;
 					await this.app.vault.process(file, mutate);
@@ -172,24 +182,51 @@ export default class MdAnnotationPlugin extends Plugin {
 			},
 		});
 		this.addCommand({
+			// Command ids are what user hotkeys bind to, so they keep their
+			// pre-1.0.20 spelling even though the visible names now say "colors".
 			id: 'toggle-annotation-formats',
-			name: 'Show/hide annotation formats',
+			name: 'Show/hide annotation colors',
 			callback: () => {
 				this.settings.annotationFormattingEnabled = !this.settings.annotationFormattingEnabled;
 				void this.saveSettings();
 				new Notice(
-					`Annotation formats ${this.settings.annotationFormattingEnabled ? 'shown' : 'hidden'}`,
+					`Annotation colors ${this.settings.annotationFormattingEnabled ? 'shown' : 'hidden'}`,
 				);
 			},
 		});
 		this.addCommand({
 			id: 'toggle-comment-formats',
-			name: 'Show/hide comment formats',
+			name: 'Show/hide comment colors',
 			callback: () => {
 				this.settings.commentsFormattingEnabled = !this.settings.commentsFormattingEnabled;
 				void this.saveSettings();
 				new Notice(
-					`Comment formats ${this.settings.commentsFormattingEnabled ? 'shown' : 'hidden'}`,
+					`Comment colors ${this.settings.commentsFormattingEnabled ? 'shown' : 'hidden'}`,
+				);
+			},
+		});
+
+		this.addCommand({
+			id: 'toggle-annotation-block',
+			name: 'Show/hide the annotation block',
+			icon: 'code',
+			callback: () => {
+				this.settings.hideAnnotationBlock = !this.settings.hideAnnotationBlock;
+				void this.saveSettings();
+				new Notice(
+					`Annotation block ${this.settings.hideAnnotationBlock ? 'hidden' : 'shown'}`,
+				);
+			},
+		});
+		this.addCommand({
+			id: 'toggle-body-end-line',
+			name: 'Show/hide the end-of-text line',
+			icon: 'minus',
+			callback: () => {
+				this.settings.bodyEndLineEnabled = !this.settings.bodyEndLineEnabled;
+				void this.saveSettings();
+				new Notice(
+					`End-of-text line ${this.settings.bodyEndLineEnabled ? 'shown' : 'hidden'}`,
 				);
 			},
 		});
@@ -221,8 +258,8 @@ export default class MdAnnotationPlugin extends Plugin {
 			},
 		});
 
-		// One "Apply - <name>" command per format, kept in sync as formats change.
-		this.syncFormatCommands();
+		// One "Apply - <name>" command per category, kept in sync as they change.
+		this.syncCategoryCommands();
 
 		this.registerEvent(
 			this.app.workspace.on('editor-menu', (menu, editor, ctx) => {
@@ -322,62 +359,62 @@ export default class MdAnnotationPlugin extends Plugin {
 
 	async saveSettings(): Promise<void> {
 		await this.saveData(this.settings);
-		// A format may have been added, renamed, or deleted — reconcile commands.
-		this.syncFormatCommands();
+		// A category may have been added, renamed, or deleted — reconcile commands.
+		this.syncCategoryCommands();
 		for (const view of this.editors) this.decorate(view);
 		this.rerenderPreviews();
 		this.toolbarHighlighter?.refresh();
 		this.notifyChange();
 	}
 
-	// ── Per-format commands ("Apply - <name>", one per format) ───────────────
+	// ── Per-category commands ("Apply - <name>", one per category) ───────────
 	//
-	// Registered dynamically so a format added in the settings tab immediately
+	// Registered dynamically so a category added in the settings tab immediately
 	// gains its own command — which also lets a Note Toolbar JavaScript item
-	// build a live "apply format" menu via ntb.menu() (see README). Removed or
-	// renamed formats have their stale command torn down. addCommand prefixes
+	// build a live "apply category" menu via ntb.menu() (see README). Removed or
+	// renamed categories have their stale command torn down. addCommand prefixes
 	// the id with the plugin id; removeCommand needs that full prefixed id.
-	private formatCommandId(formatName: string): string {
-		return `apply-${formatName}`;
+	private categoryCommandId(categoryName: string): string {
+		return `apply-${categoryName}`;
 	}
 
-	private syncFormatCommands(): void {
-		const current = new Set(Object.keys(this.settings.formatStyles));
+	private syncCategoryCommands(): void {
+		const current = new Set(Object.keys(this.settings.categoryStyles));
 		for (const name of current) {
-			if (this.formatCommandNames.has(name)) continue;
+			if (this.categoryCommandNames.has(name)) continue;
 			this.addCommand({
-				id: this.formatCommandId(name),
+				id: this.categoryCommandId(name),
 				name: `Apply - ${name}`,
 				icon: 'highlighter',
 				editorCheckCallback: (checking, editor, ctx) => {
-					// Offered only while the format still exists (guards the brief
+					// Offered only while the category still exists (guards the brief
 					// window between a delete and the next sync).
-					if (!this.settings.formatStyles[name]) return false;
+					if (!this.settings.categoryStyles[name]) return false;
 					if (checking) return true;
-					this.applyNamedFormat(editor, ctx, name);
+					this.applyNamedCategory(editor, ctx, name);
 					return true;
 				},
 			});
-			this.formatCommandNames.add(name);
+			this.categoryCommandNames.add(name);
 		}
-		for (const name of [...this.formatCommandNames]) {
+		for (const name of [...this.categoryCommandNames]) {
 			if (current.has(name)) continue;
-			this.removeCommand(`${this.manifest.id}:${this.formatCommandId(name)}`);
-			this.formatCommandNames.delete(name);
+			this.removeCommand(`${this.manifest.id}:${this.categoryCommandId(name)}`);
+			this.categoryCommandNames.delete(name);
 		}
 	}
 
-	// Selection → highlight with this format; bare cursor → comment carrying it
-	// (the marker then renders in that format's color).
-	private applyNamedFormat(
+	// Selection → highlight with this category; bare cursor → comment carrying it
+	// (the marker then renders in that category's color).
+	private applyNamedCategory(
 		editor: Editor,
 		ctx: MarkdownView | MarkdownFileInfo,
-		formatName: string,
+		categoryName: string,
 	): void {
 		const from = editor.posToOffset(editor.getCursor('from'));
 		const to = editor.posToOffset(editor.getCursor('to'));
 		const type: AnnotationType = from === to ? 'comment' : 'highlight';
-		this.addAnnotationFromEditor(editor, ctx, type, formatName);
+		this.addAnnotationFromEditor(editor, ctx, type, categoryName);
 	}
 
 	// ── Per-file state ───────────────────────────────────────────────────────
@@ -420,6 +457,15 @@ export default class MdAnnotationPlugin extends Plugin {
 	// and cache the result.
 	private setStateFromDoc(path: string, doc: string): FileAnnotationState {
 		const parsed = parseDocument(doc);
+
+		// The category field was spelled "format" before v1.0.20. Reading is
+		// transparent either way, so this only rewrites the block's spelling —
+		// once, the first time the note is parsed — rather than leaving notes
+		// split across two vocabularies forever.
+		if (parsed.legacyCategoryKey) {
+			this.queue.request(path, (text) => normalizeBlock(text));
+		}
+
 		const outcomes = resolveSelectors(
 			parsed.body,
 			parsed.annotations.map((a) => ({ id: a.id, selector: a.selector })),
@@ -475,6 +521,48 @@ export default class MdAnnotationPlugin extends Plugin {
 				})();
 			}, DISK_REFRESH_DEBOUNCE_MS),
 		);
+	}
+
+	// Apply one queued block edit through the editor that has `path` open,
+	// returning false when no editing view holds it (the caller then writes to
+	// the vault as before). `this.editors` only ever holds real note editors —
+	// Reading-view-only leaves are absent, and embedded table-cell views are
+	// detached — so falling through is exactly the "nobody is editing this"
+	// case where a disk write is safe.
+	//
+	// Two details keep the edit invisible: only the stretch that actually
+	// changed is replaced (every mutation here rewrites the end-of-file block,
+	// so the diff is a tail edit and the cursor/selection upstream of it never
+	// moves), and the transaction is kept out of the undo history — the user
+	// did not ask for a selector refresh, so ⌘Z must still undo their typing.
+	private applyThroughEditor(path: string, mutate: (text: string) => string): boolean {
+		for (const view of this.editors) {
+			if (editorViewPath(view) !== path) continue;
+			const current = view.state.doc.toString();
+			const next = mutate(current);
+			// Nothing to do, but the file IS open here — claiming the write stops
+			// the vault path from re-writing identical bytes.
+			if (next === current) return true;
+			let start = 0;
+			const shortest = Math.min(current.length, next.length);
+			while (start < shortest && current[start] === next[start]) start++;
+			let endCurrent = current.length;
+			let endNext = next.length;
+			while (
+				endCurrent > start &&
+				endNext > start &&
+				current[endCurrent - 1] === next[endNext - 1]
+			) {
+				endCurrent--;
+				endNext--;
+			}
+			view.dispatch({
+				changes: { from: start, to: endCurrent, insert: next.slice(start, endNext) },
+				annotations: Transaction.addToHistory.of(false),
+			});
+			return true;
+		}
+		return false;
 	}
 
 	// ── Editor attachment (called by the CodeMirror ViewPlugin) ──────────────
@@ -616,7 +704,7 @@ export default class MdAnnotationPlugin extends Plugin {
 
 	// ── Annotation CRUD (used by commands and the sidebar) ───────────────────
 
-	// Selection → annotation (highlight, format picked when several exist);
+	// Selection → annotation (highlight, category picked when several exist);
 	// no selection → comment marker at the cursor.
 	private annotateOrComment(editor: Editor, ctx: MarkdownView | MarkdownFileInfo): void {
 		const from = editor.posToOffset(editor.getCursor('from'));
@@ -625,17 +713,17 @@ export default class MdAnnotationPlugin extends Plugin {
 			this.addAnnotationFromEditor(editor, ctx, 'comment', '');
 			return;
 		}
-		const names = usableFormatNames(this.settings);
+		const names = usableCategoryNames(this.settings);
 		const first = names[0];
 		if (names.length === 0) {
-			new Notice('No annotation formats are enabled — check the plugin settings');
+			new Notice('No annotation categories are enabled — check the plugin settings');
 			return;
 		}
 		if (names.length === 1 && first !== undefined) {
 			this.addAnnotationFromEditor(editor, ctx, 'highlight', first);
 			return;
 		}
-		new FormatSuggestModal(this.app, names, (name) => {
+		new CategorySuggestModal(this.app, names, (name) => {
 			this.addAnnotationFromEditor(editor, ctx, 'highlight', name);
 		}).open();
 	}
@@ -644,7 +732,7 @@ export default class MdAnnotationPlugin extends Plugin {
 		editor: Editor,
 		ctx: MarkdownView | MarkdownFileInfo,
 		type: AnnotationType,
-		formatName: string,
+		categoryName: string,
 	): void {
 		const path = ctx.file?.path;
 		if (path === undefined) return;
@@ -669,7 +757,7 @@ export default class MdAnnotationPlugin extends Plugin {
 		const annotation = createAnnotation({
 			id: generateAnnotationId(Date.now(), Math.random()),
 			type,
-			format: formatName,
+			category: categoryName,
 			selector,
 			comment: '',
 			author: this.settings.author,
@@ -707,20 +795,20 @@ export default class MdAnnotationPlugin extends Plugin {
 		});
 	}
 
-	// Reassign one annotation to a different format (sidebar dropdown).
-	setFormat(path: string, id: string, formatName: string): void {
+	// Reassign one annotation to a different category (sidebar dropdown).
+	setCategory(path: string, id: string, categoryName: string): void {
 		this.patchAnnotation(path, id, {
-			format: formatName,
+			category: categoryName,
 			dateModified: formatTimestamp(Date.now()),
 		});
 		this.decorateAllFor(path);
 		this.rerenderPreviews();
 	}
 
-	// Rename a format in settings AND rewrite the "format" field in every
+	// Rename a category in settings AND rewrite the "category" field in every
 	// annotated note that references the old name (they store the name).
-	async renameFormat(oldName: string, newName: string): Promise<boolean> {
-		const styles = this.settings.formatStyles;
+	async renameCategory(oldName: string, newName: string): Promise<boolean> {
+		const styles = this.settings.categoryStyles;
 		const current = styles[oldName];
 		if (!current) return false;
 		if (newName === '' || isUnsafeKey(newName) || styles[newName]) return false;
@@ -730,7 +818,7 @@ export default class MdAnnotationPlugin extends Plugin {
 		for (const [key, value] of Object.entries(styles)) {
 			next[key === oldName ? newName : key] = value;
 		}
-		this.settings.formatStyles = next;
+		this.settings.categoryStyles = next;
 		await this.saveSettings();
 
 		let fileCount = 0;
@@ -738,19 +826,19 @@ export default class MdAnnotationPlugin extends Plugin {
 			const doc = await this.app.vault.cachedRead(file);
 			if (!doc.includes(BLOCK_OPEN)) continue;
 			const { annotations } = parseDocument(doc);
-			if (!annotations.some((a) => a.format === oldName)) continue;
-			this.queue.request(file.path, (text) => renameAnnotationFormat(text, oldName, newName));
+			if (!annotations.some((a) => a.category === oldName)) continue;
+			this.queue.request(file.path, (text) => renameAnnotationCategory(text, oldName, newName));
 			fileCount++;
 			const state = this.states.get(file.path);
 			if (state) {
 				for (const a of state.annotations) {
-					if (a.format === oldName) a.format = newName;
+					if (a.category === oldName) a.category = newName;
 				}
 			}
 		}
 		if (fileCount > 0) {
 			new Notice(
-				`MD Annotation: renamed format in ${fileCount} note${fileCount === 1 ? '' : 's'}`,
+				`MD Annotation: renamed category in ${fileCount} note${fileCount === 1 ? '' : 's'}`,
 			);
 			this.notifyChange();
 		}

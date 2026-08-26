@@ -7,7 +7,7 @@ function makeAnnotation(id: string, overrides: Partial<Annotation> = {}): Annota
 	return {
 		id,
 		type: 'comment',
-		format: '',
+		category: '',
 		selector: { exact: '', prefix: '', suffix: '' },
 		comment: '',
 		author: '',
@@ -46,7 +46,7 @@ describe('numberComments', () => {
 	it('skips highlights and orphaned comments', () => {
 		const annotations = [
 			makeAnnotation('c1'),
-			makeAnnotation('h1', { type: 'highlight', format: 'Yellow' }),
+			makeAnnotation('h1', { type: 'highlight', category: 'Yellow' }),
 			makeAnnotation('c2'),
 		];
 		const outcomes = new Map<string, MatchResult>([

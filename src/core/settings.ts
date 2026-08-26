@@ -1,11 +1,12 @@
 // Settings model, defensive normalization, and style resolution. Pure module —
 // no 'obsidian', no DOM.
 //
-// The model mirrors annotation-manager's settings (per-format grid with
+// The model mirrors annotation-manager's settings (per-category grid with
 // enable-checkbox colors, light/dark themes, font size, Use toggle) minus
 // everything bracket-related — md-annotation has no in-text delimiters.
-// Format styles are keyed by the format NAME (e.g. "Yellow", "Key"), and the
-// annotation JSON "format" field stores that same name.
+// Category styles are keyed by the category NAME (e.g. "Yellow", "Key"), and
+// the annotation JSON "category" field stores that same name. Both were
+// called "format" before v1.0.20; the old spellings are still read.
 
 // One color plus its enable checkbox; a disabled color is not applied.
 export interface ColorOption {
@@ -19,14 +20,21 @@ export interface PartStyle {
 	bg: ColorOption;
 }
 
-// Light/dark halves shared by formats and the dedicated comment style.
+// Light/dark halves shared by categories and the dedicated comment style.
 export interface ThemedPartStyles {
 	light: PartStyle;
 	dark: PartStyle;
 }
 
-// Per-format style: row-level Use toggle, font size, and Fr/Bg per theme.
-export interface FormatStyle extends ThemedPartStyles {
+// A single colour per theme (no Fr/Bg pair) — used by the end-of-text rule,
+// which draws one line and has nothing to fill.
+export interface ThemedColorOption {
+	light: ColorOption;
+	dark: ColorOption;
+}
+
+// Per-category style: row-level Use toggle, font size, and Fr/Bg per theme.
+export interface CategoryStyle extends ThemedPartStyles {
 	use: boolean;
 	fontSize: string;
 }
@@ -55,13 +63,22 @@ export function makeToolbarHighlight(light: PartStyle, dark: PartStyle): Toolbar
 
 export interface MdAnnotationSettings {
 	author: string;
-	// Keyed by format name. The annotation JSON "format" field stores the name.
-	formatStyles: Record<string, FormatStyle>;
+	// Keyed by category name. The annotation JSON "category" field stores it.
+	categoryStyles: Record<string, CategoryStyle>;
 
 	// Visibility toggles (also driven by the show/hide commands).
 	annotationFormattingEnabled: boolean;
 	commentsFormattingEnabled: boolean;
 	commentsHiddenEnabled: boolean;
+	// Collapse the %%md-annotation block out of Live Preview and Source mode,
+	// so the JSON at the foot of the note stops competing with the text.
+	// Reading view never showed it (Obsidian hides %% comments there).
+	hideAnnotationBlock: boolean;
+
+	// A rule drawn under the last line of body text — with the block hidden
+	// there is otherwise nothing marking where the note actually ends.
+	bodyEndLineEnabled: boolean;
+	bodyEndLineColor: ThemedColorOption;
 
 	// Margin gutter (Live Preview / Source mode). Each type is switched on
 	// separately — also by the "Show/hide … in the gutter" commands — and picks
@@ -74,7 +91,7 @@ export interface MdAnnotationSettings {
 	// Reserve the margin only on notes that actually have something to put in
 	// it, rather than on every note the moment the gutter is switched on.
 	gutterOnlyWhenAnnotated: boolean;
-	// Font size for gutter cards only — deliberately separate from a format's
+	// Font size for gutter cards only — deliberately separate from a category's
 	// own fontSize (which governs the in-text highlight and the sidebar quote
 	// chip) so the two surfaces can be sized independently. Blank uses the
 	// theme's default.
@@ -113,7 +130,7 @@ export function partStyle(fr = '', bg = ''): PartStyle {
 	return { fr: colorOption(fr), bg: colorOption(bg) };
 }
 
-export function makeFormatStyle(): FormatStyle {
+export function makeCategoryStyle(): CategoryStyle {
 	return { use: true, fontSize: '', light: partStyle(), dark: partStyle() };
 }
 
@@ -126,7 +143,7 @@ export function isUnsafeKey(key: string): boolean {
 export function defaultSettings(): MdAnnotationSettings {
 	return {
 		author: '',
-		formatStyles: {
+		categoryStyles: {
 			Yellow: {
 				use: true,
 				fontSize: '',
@@ -137,6 +154,9 @@ export function defaultSettings(): MdAnnotationSettings {
 		annotationFormattingEnabled: true,
 		commentsFormattingEnabled: true,
 		commentsHiddenEnabled: false,
+		hideAnnotationBlock: false,
+		bodyEndLineEnabled: false,
+		bodyEndLineColor: { light: colorOption('#b0b0b0'), dark: colorOption('#5a5a5a') },
 		gutterAnnotationsEnabled: true,
 		gutterCommentsEnabled: true,
 		gutterAnnotationsSide: 'right',
@@ -227,9 +247,9 @@ function readToolbarHighlight(v: unknown, fallback: ToolbarHighlight): ToolbarHi
 	};
 }
 
-function readFormatStyle(v: unknown): FormatStyle {
+function readCategoryStyle(v: unknown): CategoryStyle {
 	const r = asRecord(v);
-	if (!r) return makeFormatStyle();
+	if (!r) return makeCategoryStyle();
 	return {
 		use: r.use !== false,
 		fontSize: readString(r.fontSize),
@@ -249,6 +269,8 @@ export function normalizeSettings(raw: unknown): MdAnnotationSettings {
 		'annotationFormattingEnabled',
 		'commentsFormattingEnabled',
 		'commentsHiddenEnabled',
+		'hideAnnotationBlock',
+		'bodyEndLineEnabled',
 		'gutterAnnotationsEnabled',
 		'gutterCommentsEnabled',
 		'gutterOnlyWhenAnnotated',
@@ -276,22 +298,24 @@ export function normalizeSettings(raw: unknown): MdAnnotationSettings {
 	);
 	s.gutterCommentsToolbar = readToolbarHighlight(r.gutterCommentsToolbar, s.gutterCommentsToolbar);
 
-	const styles = asRecord(r.formatStyles);
+	// 'categoryStyles' since v1.0.20; 'formatStyles' is the same record under
+	// its pre-1.0.20 name.
+	const styles = asRecord(r.categoryStyles) ?? asRecord(r.formatStyles);
 	if (styles) {
 		// Current shape: name-keyed record.
-		const next: Record<string, FormatStyle> = {};
+		const next: Record<string, CategoryStyle> = {};
 		for (const [name, value] of Object.entries(styles)) {
 			if (name === '' || isUnsafeKey(name)) continue;
 			const v = asRecord(value);
 			if (!v) continue;
-			next[name] = readFormatStyle(v);
+			next[name] = readCategoryStyle(v);
 		}
-		if (Object.keys(next).length > 0) s.formatStyles = next;
+		if (Object.keys(next).length > 0) s.categoryStyles = next;
 	} else if (Array.isArray(r.formats)) {
 		// Legacy shape: formats array of {id, name, style: {light/dark
 		// {fontColor, backgroundColor}}} → name-keyed record (id as fallback
 		// name), enabled flags derived from non-empty colors.
-		const next: Record<string, FormatStyle> = {};
+		const next: Record<string, CategoryStyle> = {};
 		for (const item of r.formats) {
 			const f = asRecord(item);
 			if (!f) continue;
@@ -305,7 +329,12 @@ export function normalizeSettings(raw: unknown): MdAnnotationSettings {
 				dark: legacyPartStyle(style?.dark),
 			};
 		}
-		if (Object.keys(next).length > 0) s.formatStyles = next;
+		if (Object.keys(next).length > 0) s.categoryStyles = next;
+	}
+
+	const bel = asRecord(r.bodyEndLineColor);
+	if (bel) {
+		s.bodyEndLineColor = { light: readColorOption(bel.light), dark: readColorOption(bel.dark) };
 	}
 
 	const cs = asRecord(r.commentStyle);
@@ -322,56 +351,57 @@ export function normalizeSettings(raw: unknown): MdAnnotationSettings {
 	return s;
 }
 
-// ── Format export / import (cross-vault sharing) ───────────────────────────
+// ── Category export / import (cross-vault sharing) ─────────────────────────
 //
 // Obsidian Sync replicates one vault to *itself* on other devices — it never
-// bridges two different vaults, so a format created in vault A never reaches
+// bridges two different vaults, so a category created in vault A never reaches
 // vault B no matter how the "Installed community plugins" toggle is set.
-// These helpers move formats explicitly: export produces a JSON payload, import
-// reads one back.
+// These helpers move categories explicitly: export produces a JSON payload,
+// import reads one back.
 
-export const FORMATS_EXPORT_VERSION = 1;
+export const CATEGORIES_EXPORT_VERSION = 1;
 
-export interface FormatsPayload {
+export interface CategoriesPayload {
 	version: number;
-	formatStyles: Record<string, FormatStyle>;
+	categoryStyles: Record<string, CategoryStyle>;
 	commentStyle: ThemedPartStyles;
 }
 
-export function exportFormats(settings: MdAnnotationSettings): string {
-	const payload: FormatsPayload = {
-		version: FORMATS_EXPORT_VERSION,
-		formatStyles: settings.formatStyles,
+export function exportCategories(settings: MdAnnotationSettings): string {
+	const payload: CategoriesPayload = {
+		version: CATEGORIES_EXPORT_VERSION,
+		categoryStyles: settings.categoryStyles,
 		commentStyle: settings.commentStyle,
 	};
 	return JSON.stringify(payload, null, '\t');
 }
 
-// Every valid, safely-named format in a name-keyed record, normalized.
-function readFormatStyleRecord(v: unknown): Record<string, FormatStyle> {
+// Every valid, safely-named category in a name-keyed record, normalized.
+function readCategoryStyleRecord(v: unknown): Record<string, CategoryStyle> {
 	const styles = asRecord(v);
-	const next: Record<string, FormatStyle> = {};
+	const next: Record<string, CategoryStyle> = {};
 	if (!styles) return next;
 	for (const [name, value] of Object.entries(styles)) {
 		if (name === '' || isUnsafeKey(name)) continue;
 		if (!asRecord(value)) continue;
-		next[name] = readFormatStyle(value);
+		next[name] = readCategoryStyle(value);
 	}
 	return next;
 }
 
-export interface ImportedFormats {
-	formatStyles: Record<string, FormatStyle>;
+export interface ImportedCategories {
+	categoryStyles: Record<string, CategoryStyle>;
 	// Absent when the payload carried no comment style (e.g. a bare
-	// formatStyles object was pasted) — the current one is then kept.
+	// categoryStyles object was pasted) — the current one is then kept.
 	commentStyle: ThemedPartStyles | null;
 }
 
 // Parse a pasted payload. Accepts the full export envelope, a bare
-// { formatStyles: … } object, or a bare name-keyed record of formats, so a
-// hand-trimmed paste still works. Returns null when no format survives —
-// the caller reports that rather than wiping the user's formats.
-export function parseFormatsImport(text: string): ImportedFormats | null {
+// { categoryStyles: … } object (or its pre-1.0.20 { formatStyles: … } name),
+// or a bare name-keyed record of categories, so a hand-trimmed paste still
+// works. Returns null when no category survives — the caller reports that
+// rather than wiping the user's categories.
+export function parseCategoriesImport(text: string): ImportedCategories | null {
 	let raw: unknown;
 	try {
 		raw = JSON.parse(text);
@@ -381,36 +411,37 @@ export function parseFormatsImport(text: string): ImportedFormats | null {
 	const r = asRecord(raw);
 	if (!r) return null;
 
-	const source = 'formatStyles' in r ? r.formatStyles : raw;
-	const formatStyles = readFormatStyleRecord(source);
-	if (Object.keys(formatStyles).length === 0) return null;
+	const source =
+		'categoryStyles' in r ? r.categoryStyles : 'formatStyles' in r ? r.formatStyles : raw;
+	const categoryStyles = readCategoryStyleRecord(source);
+	if (Object.keys(categoryStyles).length === 0) return null;
 
 	const commentStyle = asRecord(r.commentStyle) ? readThemedPartStyles(r.commentStyle) : null;
-	return { formatStyles, commentStyle };
+	return { categoryStyles, commentStyle };
 }
 
 // 'replace' takes the imported set verbatim; 'merge' keeps every existing
-// format untouched and appends only names not already present.
-export function mergeFormats(
-	current: Record<string, FormatStyle>,
-	incoming: Record<string, FormatStyle>,
+// category untouched and appends only names not already present.
+export function mergeCategories(
+	current: Record<string, CategoryStyle>,
+	incoming: Record<string, CategoryStyle>,
 	mode: 'merge' | 'replace',
-): { formatStyles: Record<string, FormatStyle>; added: string[]; skipped: string[] } {
+): { categoryStyles: Record<string, CategoryStyle>; added: string[]; skipped: string[] } {
 	if (mode === 'replace') {
-		return { formatStyles: { ...incoming }, added: Object.keys(incoming), skipped: [] };
+		return { categoryStyles: { ...incoming }, added: Object.keys(incoming), skipped: [] };
 	}
-	const formatStyles: Record<string, FormatStyle> = { ...current };
+	const categoryStyles: Record<string, CategoryStyle> = { ...current };
 	const added: string[] = [];
 	const skipped: string[] = [];
 	for (const [name, style] of Object.entries(incoming)) {
-		if (name in formatStyles) {
+		if (name in categoryStyles) {
 			skipped.push(name);
 			continue;
 		}
-		formatStyles[name] = style;
+		categoryStyles[name] = style;
 		added.push(name);
 	}
-	return { formatStyles, added, skipped };
+	return { categoryStyles, added, skipped };
 }
 
 // ── Hex / font-size validation ─────────────────────────────────────────────
@@ -441,11 +472,13 @@ export function isValidFontSize(value: string): boolean {
 // ── CSS classes & inline style resolution ──────────────────────────────────
 
 export const HIGHLIGHT_CLASS = 'mdann-hl';
+// Line decoration carrying the end-of-text rule (see bodyEndLineEnabled).
+export const BODY_END_LINE_CLASS = 'mdann-body-end';
 export const COMMENT_CLASS = 'mdann-comment';
 export const MARKER_CLASS = 'mdann-marker';
 // An element inserted purely so the Reading-view gutter has something to
 // measure: it carries the annotation id but no visible styling of its own,
-// used where the annotation itself is deliberately not being drawn (formatting
+// used where the annotation itself is deliberately not being drawn (colouring
 // switched off, or comment markers hidden) yet its card is still wanted.
 export const ANCHOR_CLASS = 'mdann-anchor';
 // Painted onto an element the plugin does not own — an Obsidian Live Preview
@@ -455,45 +488,45 @@ export const ANCHOR_CLASS = 'mdann-anchor';
 // foreign element. Its own rule in styles.css mirrors the highlight colours.
 export const WIDGET_HL_CLASS = 'mdann-widget-hl';
 
-export function formatClass(formatName: string): string {
-	return 'mdann-f-' + formatName.replace(/[^a-zA-Z0-9_-]/g, '-');
+export function categoryClass(categoryName: string): string {
+	return 'mdann-f-' + categoryName.replace(/[^a-zA-Z0-9_-]/g, '-');
 }
 
-// First format whose Use box is checked ('' when none).
-export function firstUsedFormatName(settings: MdAnnotationSettings): string {
-	for (const [name, style] of Object.entries(settings.formatStyles)) {
+// First category whose Use box is checked ('' when none).
+export function firstUsedCategoryName(settings: MdAnnotationSettings): string {
+	for (const [name, style] of Object.entries(settings.categoryStyles)) {
 		if (style.use) return name;
 	}
 	return '';
 }
 
-// Format names available for new annotations (Use checked), insertion order.
-export function usableFormatNames(settings: MdAnnotationSettings): string[] {
-	return Object.entries(settings.formatStyles)
+// Category names available for new annotations (Use checked), insertion order.
+export function usableCategoryNames(settings: MdAnnotationSettings): string[] {
+	return Object.entries(settings.categoryStyles)
 		.filter(([, style]) => style.use)
 		.map(([name]) => name);
 }
 
-export interface ResolvedFormat {
+export interface ResolvedCategory {
 	style: ThemedPartStyles;
 	fontSize: string;
 }
 
-// Resolve which style applies to one annotation. Comments (format '') use the
-// dedicated comment style; highlights resolve their format name, falling back
-// to the first Use-checked format when the name is unknown or unchecked
-// (covers renamed/deleted formats until the user reassigns via the sidebar).
+// Resolve which style applies to one annotation. Comments (category '') use
+// the dedicated comment style; highlights resolve their category name, falling
+// back to the first Use-checked category when the name is unknown or unchecked
+// (covers renamed/deleted categories until the user reassigns via the sidebar).
 export function resolveStyle(
 	annotationType: 'highlight' | 'comment',
-	formatName: string,
+	categoryName: string,
 	settings: MdAnnotationSettings,
-): ResolvedFormat | null {
-	if (annotationType === 'comment' && formatName === '') {
+): ResolvedCategory | null {
+	if (annotationType === 'comment' && categoryName === '') {
 		return { style: settings.commentStyle, fontSize: '' };
 	}
-	const exact = settings.formatStyles[formatName];
+	const exact = settings.categoryStyles[categoryName];
 	if (exact?.use) return { style: exact, fontSize: exact.fontSize };
-	const fallback = settings.formatStyles[firstUsedFormatName(settings)];
+	const fallback = settings.categoryStyles[firstUsedCategoryName(settings)];
 	return fallback ? { style: fallback, fontSize: fallback.fontSize } : null;
 }
 
@@ -509,16 +542,24 @@ export function themedColors(style: ThemedPartStyles, dark: boolean): { fg: stri
 	return { fg: enabledColor(part.fr), bg: enabledColor(part.bg) };
 }
 
+// The end-of-text rule's colour for the active theme, '' when the theme's
+// colour is switched off or unreadable (callers then fall back to the theme's
+// own border colour in styles.css).
+export function bodyEndLineColor(settings: MdAnnotationSettings, dark: boolean): string {
+	const opt = dark ? settings.bodyEndLineColor.dark : settings.bodyEndLineColor.light;
+	return enabledColor(opt);
+}
+
 // Inline CSS custom properties for one highlight/marker. Static rules in
 // styles.css consume these per theme, so colors follow light/dark switches.
 // Only validated hex values (and a validated font-size) are ever emitted —
 // invalid settings text degrades to defaults, no CSS injection.
 export function highlightStyleVars(
 	annotationType: 'highlight' | 'comment',
-	formatName: string,
+	categoryName: string,
 	settings: MdAnnotationSettings,
 ): Record<string, string> {
-	const resolved = resolveStyle(annotationType, formatName, settings);
+	const resolved = resolveStyle(annotationType, categoryName, settings);
 	if (!resolved) return {};
 	const { style, fontSize } = resolved;
 	const color = (opt: ColorOption, fallback: string): string => enabledColor(opt) || fallback;
@@ -536,10 +577,10 @@ export function highlightStyleVars(
 // attributes).
 export function highlightStyleText(
 	annotationType: 'highlight' | 'comment',
-	formatName: string,
+	categoryName: string,
 	settings: MdAnnotationSettings,
 ): string {
-	return Object.entries(highlightStyleVars(annotationType, formatName, settings))
+	return Object.entries(highlightStyleVars(annotationType, categoryName, settings))
 		.map(([prop, value]) => `${prop}: ${value};`)
 		.join(' ');
 }
@@ -549,18 +590,18 @@ export function highlightStyleText(
 // for disabled colors, which cannot serve as a border color. Here a disabled
 // color is simply omitted so the CSS `var(--…, fallback)` in styles.css takes
 // over — a card with no Fr color still gets a visible border from the theme.
-// The card's border colour is the format's Fr (text) colour by design.
+// The card's border colour is the category's Fr (text) colour by design.
 //
-// Font size is deliberately NOT the format's own fontSize (that one governs
+// Font size is deliberately NOT the category's own fontSize (that one governs
 // the in-text highlight and the sidebar quote chip) — the gutter has its own
 // dedicated size per type, set on the Gutter settings tab, so it never
 // affects the sidebar.
 export function gutterStyleVars(
 	annotationType: 'highlight' | 'comment',
-	formatName: string,
+	categoryName: string,
 	settings: MdAnnotationSettings,
 ): Record<string, string> {
-	const resolved = resolveStyle(annotationType, formatName, settings);
+	const resolved = resolveStyle(annotationType, categoryName, settings);
 	if (!resolved) return {};
 	const { style } = resolved;
 	const vars: Record<string, string> = {};
@@ -593,17 +634,17 @@ export const GUTTER_STYLE_PROPS = [
 // The CSS class list for one annotation's highlight span/decoration.
 export function highlightClasses(
 	annotationType: 'highlight' | 'comment',
-	formatName: string,
+	categoryName: string,
 	settings: MdAnnotationSettings,
 ): string {
-	if (annotationType === 'comment' && formatName === '') {
+	if (annotationType === 'comment' && categoryName === '') {
 		return `${HIGHLIGHT_CLASS} ${COMMENT_CLASS}`;
 	}
-	const known = settings.formatStyles[formatName]?.use;
-	const name = known ? formatName : firstUsedFormatName(settings);
+	const known = settings.categoryStyles[categoryName]?.use;
+	const name = known ? categoryName : firstUsedCategoryName(settings);
 	return name === ''
 		? HIGHLIGHT_CLASS
-		: `${HIGHLIGHT_CLASS} ${formatClass(name)}`;
+		: `${HIGHLIGHT_CLASS} ${categoryClass(name)}`;
 }
 
 // The CSS class list for a point-comment marker.

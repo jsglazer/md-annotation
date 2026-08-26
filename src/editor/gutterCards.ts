@@ -131,7 +131,7 @@ export class CardLayers {
 		}
 
 		card.root.classList.toggle('mdann-gutter-card-closed', annotation.status === 'closed');
-		const vars = gutterStyleVars(annotation.type, annotation.format, settings);
+		const vars = gutterStyleVars(annotation.type, annotation.category, settings);
 		applyStyleProps(card.root, vars);
 		applyStyleProps(card.leader, vars);
 		return card;

@@ -3,10 +3,12 @@ import {
 	BLOCK_CLOSE,
 	BLOCK_OPEN,
 	composeDocument,
+	findBlockRange,
+	normalizeBlock,
 	parseDocument,
 	removeAnnotation,
 	removeUnparseableLine,
-	renameAnnotationFormat,
+	renameAnnotationCategory,
 	serializeAnnotationLine,
 	updateAnnotation,
 	upsertAnnotation,
@@ -17,7 +19,7 @@ function makeAnnotation(id: string, overrides: Partial<Annotation> = {}): Annota
 	return {
 		id,
 		type: 'highlight',
-		format: 'default',
+		category: 'default',
 		selector: { exact: 'quote', prefix: 'pre ', suffix: ' post' },
 		comment: '',
 		author: 'josh',
@@ -48,7 +50,12 @@ describe('parseDocument — valid input', () => {
 
 	it('returns the whole document as body when no block exists', () => {
 		const parsed = parseDocument(BODY);
-		expect(parsed).toEqual({ body: BODY, annotations: [], unparseable: [] });
+		expect(parsed).toEqual({
+			body: BODY,
+			annotations: [],
+			unparseable: [],
+			legacyCategoryKey: false,
+		});
 	});
 
 	it('skips blank lines inside the block', () => {
@@ -195,29 +202,112 @@ describe('document edit helpers never touch the body', () => {
 	});
 });
 
-describe('renameAnnotationFormat', () => {
+describe('renameAnnotationCategory', () => {
 	it('renames the format on every matching annotation and no others', () => {
-		const a = makeAnnotation('a1', { format: 'Yellow' });
-		const b = makeAnnotation('b2', { format: 'Red' });
-		const c = makeAnnotation('c3', { format: 'Yellow' });
+		const a = makeAnnotation('a1', { category: 'Yellow' });
+		const b = makeAnnotation('b2', { category: 'Red' });
+		const c = makeAnnotation('c3', { category: 'Yellow' });
 		const doc = docWith([a, b, c].map(serializeAnnotationLine));
-		const renamed = renameAnnotationFormat(doc, 'Yellow', 'Key');
+		const renamed = renameAnnotationCategory(doc, 'Yellow', 'Key');
 		const parsed = parseDocument(renamed);
-		expect(parsed.annotations.map((x) => x.format)).toEqual(['Key', 'Red', 'Key']);
+		expect(parsed.annotations.map((x) => x.category)).toEqual(['Key', 'Red', 'Key']);
 		expect(parsed.body).toBe(BODY);
 	});
 
 	it('returns the document unchanged when no annotation uses the old name', () => {
-		const a = makeAnnotation('a1', { format: 'Red' });
+		const a = makeAnnotation('a1', { category: 'Red' });
 		const doc = docWith([serializeAnnotationLine(a)]);
-		expect(renameAnnotationFormat(doc, 'Yellow', 'Key')).toBe(doc);
+		expect(renameAnnotationCategory(doc, 'Yellow', 'Key')).toBe(doc);
 	});
 
 	it('preserves unparseable lines verbatim through a rename', () => {
-		const a = makeAnnotation('a1', { format: 'Yellow' });
+		const a = makeAnnotation('a1', { category: 'Yellow' });
 		const corrupt = '{"id":"broken", not json';
 		const doc = docWith([serializeAnnotationLine(a), corrupt]);
-		const renamed = renameAnnotationFormat(doc, 'Yellow', 'Key');
+		const renamed = renameAnnotationCategory(doc, 'Yellow', 'Key');
 		expect(parseDocument(renamed).unparseable).toEqual([corrupt]);
+	});
+});
+
+// ── v1.0.20 rename: "format" → "category" ─────────────────────────────────
+
+describe('legacy "format" key', () => {
+	const legacyLine = JSON.stringify({
+		id: 'a1',
+		type: 'highlight',
+		format: 'Key',
+		selector: { exact: 'quote', prefix: 'pre ', suffix: ' post' },
+		comment: 'note',
+		author: 'josh',
+		status: 'open',
+		dateCreate: '2026-07-22T00:00:00.000Z',
+		dateModified: '2026-07-22T00:00:00.000Z',
+		dateClosed: null,
+	});
+
+	it('reads a pre-1.0.20 line as a category and flags the document', () => {
+		const parsed = parseDocument(docWith([legacyLine]));
+		expect(parsed.annotations[0]?.category).toBe('Key');
+		expect(parsed.unparseable).toEqual([]);
+		expect(parsed.legacyCategoryKey).toBe(true);
+	});
+
+	it('does not keep the old key as an extra', () => {
+		const parsed = parseDocument(docWith([legacyLine]));
+		expect(parsed.annotations[0]?.extras).toBeUndefined();
+		expect(serializeAnnotationLine(parsed.annotations[0]!)).not.toContain('"format"');
+	});
+
+	it('prefers "category" when a line carries both', () => {
+		const both = JSON.parse(legacyLine) as Record<string, unknown>;
+		both.category = 'Define';
+		const parsed = parseDocument(docWith([JSON.stringify(both)]));
+		expect(parsed.annotations[0]?.category).toBe('Define');
+		expect(parsed.legacyCategoryKey).toBe(false);
+	});
+
+	it('normalizeBlock rewrites the block onto the new key, body untouched', () => {
+		const doc = docWith([legacyLine]);
+		const migrated = normalizeBlock(doc);
+		expect(migrated).toContain('"category":"Key"');
+		expect(migrated).not.toContain('"format"');
+		expect(parseDocument(migrated).body).toBe(BODY);
+		expect(parseDocument(migrated).annotations).toEqual(parseDocument(doc).annotations);
+	});
+
+	it('normalizeBlock leaves a document with no block alone', () => {
+		expect(normalizeBlock(BODY)).toBe(BODY);
+	});
+});
+
+describe('findBlockRange', () => {
+	it('spans the open marker line through the close marker line', () => {
+		const line = serializeAnnotationLine(makeAnnotation('a1'));
+		const doc = docWith([line]);
+		const range = findBlockRange(doc);
+		expect(range).not.toBeNull();
+		expect(doc.slice(range!.start, range!.end)).toBe(
+			`${BLOCK_OPEN}\n${line}\n${BLOCK_CLOSE}`,
+		);
+	});
+
+	it('runs to end-of-document when the block was never closed', () => {
+		const line = serializeAnnotationLine(makeAnnotation('a1'));
+		const doc = `${BODY}\n${BLOCK_OPEN}\n${line}`;
+		const range = findBlockRange(doc);
+		expect(doc.slice(range!.start, range!.end)).toBe(`${BLOCK_OPEN}\n${line}`);
+	});
+
+	it('is null for a document with no block', () => {
+		expect(findBlockRange(BODY)).toBeNull();
+	});
+
+	it('ignores a stray marker earlier in the body', () => {
+		const line = serializeAnnotationLine(makeAnnotation('a1'));
+		const doc = `${BLOCK_OPEN} in prose\n${BODY}\n${BLOCK_OPEN}\n${line}\n${BLOCK_CLOSE}\n`;
+		const range = findBlockRange(doc);
+		expect(doc.slice(range!.start, range!.end)).toBe(
+			`${BLOCK_OPEN}\n${line}\n${BLOCK_CLOSE}`,
+		);
 	});
 });

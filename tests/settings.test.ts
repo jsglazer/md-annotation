@@ -4,48 +4,49 @@ import {
 	GUTTER_MAX_WIDTH,
 	GUTTER_MIN_WIDTH,
 	GUTTER_STYLE_PROPS,
+	bodyEndLineColor,
 	clampGutterWidth,
 	defaultSettings,
-	exportFormats,
-	firstUsedFormatName,
-	formatClass,
+	exportCategories,
+	firstUsedCategoryName,
+	categoryClass,
 	gutterStyleVars,
 	highlightClasses,
 	highlightStyleVars,
 	isValidFontSize,
-	makeFormatStyle,
-	mergeFormats,
+	makeCategoryStyle,
+	mergeCategories,
 	normalizeHex,
-	parseFormatsImport,
+	parseCategoriesImport,
 	normalizeSettings,
 	partStyle,
 	resolveStyle,
 	themedColors,
-	usableFormatNames,
+	usableCategoryNames,
 } from '../src/core/settings';
 
 describe('normalizeSettings', () => {
 	it('returns defaults for missing or malformed data', () => {
 		expect(normalizeSettings(null)).toEqual(defaultSettings());
 		expect(normalizeSettings('junk')).toEqual(defaultSettings());
-		expect(normalizeSettings({ formatStyles: 'nope' })).toEqual(defaultSettings());
+		expect(normalizeSettings({ categoryStyles: 'nope' })).toEqual(defaultSettings());
 	});
 
 	it('reads the current name-keyed shape and drops unsafe/empty keys', () => {
 		const s = normalizeSettings({
 			author: 'Josh',
 			annotationFormattingEnabled: false,
-			formatStyles: {
+			categoryStyles: {
 				Key: { use: true, fontSize: '12px', light: partStyle('#111111', ''), dark: partStyle() },
-				'': makeFormatStyle(),
-				__proto__: makeFormatStyle(),
+				'': makeCategoryStyle(),
+				__proto__: makeCategoryStyle(),
 			},
 		});
 		expect(s.author).toBe('Josh');
 		expect(s.annotationFormattingEnabled).toBe(false);
-		expect(Object.keys(s.formatStyles)).toEqual(['Key']);
-		expect(s.formatStyles['Key']?.fontSize).toBe('12px');
-		expect(s.formatStyles['Key']?.light.fr).toEqual({ enabled: true, color: '#111111' });
+		expect(Object.keys(s.categoryStyles)).toEqual(['Key']);
+		expect(s.categoryStyles['Key']?.fontSize).toBe('12px');
+		expect(s.categoryStyles['Key']?.light.fr).toEqual({ enabled: true, color: '#111111' });
 	});
 
 	it('migrates the legacy formats array to a name-keyed record', () => {
@@ -60,8 +61,8 @@ describe('normalizeSettings', () => {
 				{ id: 'id-only' }, // falls back to id as name
 			],
 		});
-		expect(Object.keys(s.formatStyles)).toEqual(['Red', 'id-only']);
-		const red = s.formatStyles['Red'];
+		expect(Object.keys(s.categoryStyles)).toEqual(['Red', 'id-only']);
+		const red = s.categoryStyles['Red'];
 		expect(red?.use).toBe(true);
 		expect(red?.light.fr).toEqual({ enabled: true, color: '#ff0000' });
 		expect(red?.light.bg).toEqual({ enabled: false, color: '' });
@@ -110,18 +111,18 @@ describe('resolveStyle / format fallbacks', () => {
 
 	it('falls back to the first Use-checked format for unknown names', () => {
 		const s = defaultSettings();
-		expect(resolveStyle('highlight', 'gone', s)?.style).toBe(s.formatStyles['Yellow']);
+		expect(resolveStyle('highlight', 'gone', s)?.style).toBe(s.categoryStyles['Yellow']);
 	});
 
 	it('skips formats with Use unchecked', () => {
 		const s = defaultSettings();
-		s.formatStyles['Red'] = makeFormatStyle();
-		const yellow = s.formatStyles['Yellow'];
+		s.categoryStyles['Red'] = makeCategoryStyle();
+		const yellow = s.categoryStyles['Yellow'];
 		if (!yellow) throw new Error('default format missing');
 		yellow.use = false;
-		expect(firstUsedFormatName(s)).toBe('Red');
-		expect(usableFormatNames(s)).toEqual(['Red']);
-		expect(resolveStyle('highlight', 'Yellow', s)?.style).toBe(s.formatStyles['Red']);
+		expect(firstUsedCategoryName(s)).toBe('Red');
+		expect(usableCategoryNames(s)).toEqual(['Red']);
+		expect(resolveStyle('highlight', 'Yellow', s)?.style).toBe(s.categoryStyles['Red']);
 	});
 });
 
@@ -138,7 +139,7 @@ describe('highlightStyleVars', () => {
 
 	it('ignores disabled colors even when a color is stored', () => {
 		const s = defaultSettings();
-		const yellow = s.formatStyles['Yellow'];
+		const yellow = s.categoryStyles['Yellow'];
 		if (!yellow) throw new Error('default format missing');
 		yellow.light.bg.enabled = false;
 		expect(highlightStyleVars('highlight', 'Yellow', s)['--mdann-light-bg']).toBe('transparent');
@@ -146,7 +147,7 @@ describe('highlightStyleVars', () => {
 
 	it('never emits invalid color or size values (no CSS injection)', () => {
 		const s = defaultSettings();
-		const yellow = s.formatStyles['Yellow'];
+		const yellow = s.categoryStyles['Yellow'];
 		if (!yellow) throw new Error('default format missing');
 		yellow.light.bg.color = 'red; } body { display:none';
 		yellow.light.fr = { enabled: true, color: '#123456' };
@@ -159,7 +160,7 @@ describe('highlightStyleVars', () => {
 
 	it('emits a validated font-size', () => {
 		const s = defaultSettings();
-		const yellow = s.formatStyles['Yellow'];
+		const yellow = s.categoryStyles['Yellow'];
 		if (!yellow) throw new Error('default format missing');
 		yellow.fontSize = '1.2em';
 		expect(highlightStyleVars('highlight', 'Yellow', s)['font-size']).toBe('1.2em');
@@ -179,7 +180,7 @@ describe('highlightClasses', () => {
 	});
 
 	it('sanitizes format names into safe class names', () => {
-		expect(formatClass('weird name!')).toBe('mdann-f-weird-name-');
+		expect(categoryClass('weird name!')).toBe('mdann-f-weird-name-');
 	});
 });
 
@@ -249,7 +250,7 @@ describe('gutterStyleVars', () => {
 
 	it('emits the text color, which styles.css also uses as the border color', () => {
 		const s = defaultSettings();
-		const yellow = s.formatStyles['Yellow'];
+		const yellow = s.categoryStyles['Yellow'];
 		if (!yellow) throw new Error('default format missing');
 		yellow.light.fr = { enabled: true, color: '#aa0000' };
 		const vars = gutterStyleVars('highlight', 'Yellow', s);
@@ -259,7 +260,7 @@ describe('gutterStyleVars', () => {
 
 	it('never emits invalid color or size values', () => {
 		const s = defaultSettings();
-		const yellow = s.formatStyles['Yellow'];
+		const yellow = s.categoryStyles['Yellow'];
 		if (!yellow) throw new Error('default format missing');
 		yellow.light.bg.color = 'red; } body { display:none';
 		s.gutterAnnotationsFontSize = '12px; color: red';
@@ -272,7 +273,7 @@ describe('gutterStyleVars', () => {
 
 	it('uses the gutter font size, not the format\'s own fontSize — it never affects the sidebar', () => {
 		const s = defaultSettings();
-		const yellow = s.formatStyles['Yellow'];
+		const yellow = s.categoryStyles['Yellow'];
 		if (!yellow) throw new Error('default format missing');
 		yellow.fontSize = '20px';
 		expect(gutterStyleVars('highlight', 'Yellow', s)['font-size']).toBeUndefined();
@@ -293,7 +294,7 @@ describe('gutterStyleVars', () => {
 
 	it('covers every property it can emit, so stale ones can be cleared', () => {
 		const s = defaultSettings();
-		const yellow = s.formatStyles['Yellow'];
+		const yellow = s.categoryStyles['Yellow'];
 		if (!yellow) throw new Error('default format missing');
 		yellow.light.fr = { enabled: true, color: '#111111' };
 		yellow.dark.fr = { enabled: true, color: '#eeeeee' };
@@ -307,44 +308,44 @@ describe('gutterStyleVars', () => {
 describe('format export / import', () => {
 	it('round-trips formats and the comment style', () => {
 		const s = defaultSettings();
-		s.formatStyles['Key'] = makeFormatStyle();
-		const parsed = parseFormatsImport(exportFormats(s));
+		s.categoryStyles['Key'] = makeCategoryStyle();
+		const parsed = parseCategoriesImport(exportCategories(s));
 		expect(parsed).not.toBeNull();
-		expect(Object.keys(parsed?.formatStyles ?? {})).toEqual(['Yellow', 'Key']);
+		expect(Object.keys(parsed?.categoryStyles ?? {})).toEqual(['Yellow', 'Key']);
 		expect(parsed?.commentStyle).toEqual(s.commentStyle);
 	});
 
 	it('accepts a bare name-keyed record and reports no comment style', () => {
-		const parsed = parseFormatsImport(JSON.stringify({ Key: makeFormatStyle() }));
-		expect(Object.keys(parsed?.formatStyles ?? {})).toEqual(['Key']);
+		const parsed = parseCategoriesImport(JSON.stringify({ Key: makeCategoryStyle() }));
+		expect(Object.keys(parsed?.categoryStyles ?? {})).toEqual(['Key']);
 		expect(parsed?.commentStyle).toBeNull();
 	});
 
 	it('rejects malformed, empty, or format-free payloads', () => {
-		expect(parseFormatsImport('not json')).toBeNull();
-		expect(parseFormatsImport('[]')).toBeNull();
-		expect(parseFormatsImport('{"formatStyles":{}}')).toBeNull();
+		expect(parseCategoriesImport('not json')).toBeNull();
+		expect(parseCategoriesImport('[]')).toBeNull();
+		expect(parseCategoriesImport('{"categoryStyles":{}}')).toBeNull();
 	});
 
 	it('drops prototype-unsafe names on import', () => {
-		const parsed = parseFormatsImport(
-			'{"formatStyles":{"__proto__":{"use":true},"Key":{"use":true}}}',
+		const parsed = parseCategoriesImport(
+			'{"categoryStyles":{"__proto__":{"use":true},"Key":{"use":true}}}',
 		);
-		expect(Object.keys(parsed?.formatStyles ?? {})).toEqual(['Key']);
+		expect(Object.keys(parsed?.categoryStyles ?? {})).toEqual(['Key']);
 	});
 
 	it('merge keeps existing formats and appends only new names', () => {
-		const current = { Key: makeFormatStyle() };
-		const incoming = { Key: makeFormatStyle(), Define: makeFormatStyle() };
-		const result = mergeFormats(current, incoming, 'merge');
+		const current = { Key: makeCategoryStyle() };
+		const incoming = { Key: makeCategoryStyle(), Define: makeCategoryStyle() };
+		const result = mergeCategories(current, incoming, 'merge');
 		expect(result.added).toEqual(['Define']);
 		expect(result.skipped).toEqual(['Key']);
-		expect(result.formatStyles['Key']).toBe(current['Key']);
+		expect(result.categoryStyles['Key']).toBe(current['Key']);
 	});
 
 	it('replace takes the imported set verbatim', () => {
-		const result = mergeFormats({ Key: makeFormatStyle() }, { Define: makeFormatStyle() }, 'replace');
-		expect(Object.keys(result.formatStyles)).toEqual(['Define']);
+		const result = mergeCategories({ Key: makeCategoryStyle() }, { Define: makeCategoryStyle() }, 'replace');
+		expect(Object.keys(result.categoryStyles)).toEqual(['Define']);
 		expect(result.skipped).toEqual([]);
 	});
 });
@@ -399,5 +400,71 @@ describe('themedColors', () => {
 		};
 		expect(themedColors(style, false)).toEqual({ fg: '', bg: '' });
 		expect(themedColors(style, true)).toEqual({ fg: '#abcdef', bg: '#000000' });
+	});
+});
+
+// ── v1.0.20 rename + the two note-layout settings ─────────────────────────
+
+describe('legacy formatStyles key', () => {
+	it('reads a pre-1.0.20 formatStyles record as categoryStyles', () => {
+		const s = normalizeSettings({
+			formatStyles: { Key: { use: true, fontSize: '', light: {}, dark: {} } },
+		});
+		expect(Object.keys(s.categoryStyles)).toEqual(['Key']);
+	});
+
+	it('prefers categoryStyles when both are stored', () => {
+		const s = normalizeSettings({
+			categoryStyles: { New: { use: true, fontSize: '', light: {}, dark: {} } },
+			formatStyles: { Old: { use: true, fontSize: '', light: {}, dark: {} } },
+		});
+		expect(Object.keys(s.categoryStyles)).toEqual(['New']);
+	});
+
+	it('imports a payload that still uses the formatStyles envelope key', () => {
+		const parsed = parseCategoriesImport('{"version":1,"formatStyles":{"Key":{"use":true}}}');
+		expect(Object.keys(parsed?.categoryStyles ?? {})).toEqual(['Key']);
+	});
+});
+
+describe('note layout settings', () => {
+	it('defaults both display aids off', () => {
+		const s = defaultSettings();
+		expect(s.hideAnnotationBlock).toBe(false);
+		expect(s.bodyEndLineEnabled).toBe(false);
+	});
+
+	it('round-trips the toggles through normalization', () => {
+		const s = normalizeSettings({ hideAnnotationBlock: true, bodyEndLineEnabled: true });
+		expect(s.hideAnnotationBlock).toBe(true);
+		expect(s.bodyEndLineEnabled).toBe(true);
+	});
+
+	it('ignores non-boolean toggle values', () => {
+		const s = normalizeSettings({ hideAnnotationBlock: 'yes', bodyEndLineEnabled: 1 });
+		expect(s.hideAnnotationBlock).toBe(false);
+		expect(s.bodyEndLineEnabled).toBe(false);
+	});
+
+	it('resolves the end-of-text rule colour per theme', () => {
+		const s = normalizeSettings({
+			bodyEndLineColor: {
+				light: { enabled: true, color: '#112233' },
+				dark: { enabled: true, color: '#abcdef' },
+			},
+		});
+		expect(bodyEndLineColor(s, false)).toBe('#112233');
+		expect(bodyEndLineColor(s, true)).toBe('#abcdef');
+	});
+
+	it('returns no colour when a theme is switched off or the hex is invalid', () => {
+		const s = normalizeSettings({
+			bodyEndLineColor: {
+				light: { enabled: false, color: '#112233' },
+				dark: { enabled: true, color: 'nope' },
+			},
+		});
+		expect(bodyEndLineColor(s, false)).toBe('');
+		expect(bodyEndLineColor(s, true)).toBe('');
 	});
 });

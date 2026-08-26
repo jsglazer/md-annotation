@@ -21,7 +21,7 @@ export function formatTimestamp(nowMs: number): string {
 export interface CreateAnnotationInput {
 	id: string;
 	type: AnnotationType;
-	format: string;
+	category: string;
 	selector: TextQuoteSelector;
 	comment: string;
 	author: string;
@@ -33,7 +33,7 @@ export function createAnnotation(input: CreateAnnotationInput): Annotation {
 	return {
 		id: input.id,
 		type: input.type,
-		format: input.format,
+		category: input.category,
 		selector: input.selector,
 		comment: input.comment,
 		author: input.author,

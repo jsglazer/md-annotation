@@ -494,7 +494,7 @@ export function createReadingPostProcessor(host: ReadingHost) {
 				child.tryMarker(
 					selector,
 					markerClasses() + (styled ? '' : ' mdann-marker-plain'),
-					styled ? highlightStyleVars(annotation.type, annotation.format, settings) : {},
+					styled ? highlightStyleVars(annotation.type, annotation.category, settings) : {},
 					annotation.id,
 					number !== undefined ? String(number) : '',
 					() => host.revealAnnotation(ctx.sourcePath, annotation.id),
@@ -523,8 +523,8 @@ export function createReadingPostProcessor(host: ReadingHost) {
 			}
 			child.tryWrap(
 				selector,
-				`${highlightClasses(annotation.type, annotation.format, settings)} mdann-hl-clickable`,
-				highlightStyleVars(annotation.type, annotation.format, settings),
+				`${highlightClasses(annotation.type, annotation.category, settings)} mdann-hl-clickable`,
+				highlightStyleVars(annotation.type, annotation.category, settings),
 				annotation.id,
 				() => host.revealAnnotation(ctx.sourcePath, annotation.id),
 				at,

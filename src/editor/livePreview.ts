@@ -8,18 +8,22 @@
 // CodeMirror instantiates it per editor, so no undocumented Obsidian
 // internals are needed to reach the editor or dispatch effects.
 
-import { RangeSetBuilder, StateEffect, StateField } from '@codemirror/state';
+import { StateEffect, StateField } from '@codemirror/state';
+import type { Range } from '@codemirror/state';
 import type { Extension } from '@codemirror/state';
 import { Decoration, EditorView, ViewPlugin, WidgetType } from '@codemirror/view';
 import type { DecorationSet } from '@codemirror/view';
 import { editorInfoField, setIcon } from 'obsidian';
 
+import { findBlockRange } from '../core/block';
 import { selectDecorationRanges } from '../core/decorations';
 import type { MatchResult } from '../core/matcher';
 import { numberComments } from '../core/ordering';
 import type { MdAnnotationSettings } from '../core/settings';
 import {
+	BODY_END_LINE_CLASS,
 	WIDGET_HL_CLASS,
+	bodyEndLineColor,
 	highlightClasses,
 	highlightStyleText,
 	markerClasses,
@@ -325,6 +329,8 @@ class CommentMarkerWidget extends WidgetType {
 //   - annotationFormattingEnabled off → no highlight decorations
 //   - commentsFormattingEnabled off → range comments undecorated, markers plain
 //   - commentsHiddenEnabled on → no markers at all
+//   - hideAnnotationBlock on → the %%md-annotation block is replaced away
+//   - bodyEndLineEnabled on → a rule under the last line of body text
 //
 // Which annotations qualify, and over what range, lives in
 // core/decorations.ts — including the table and clamping rules.
@@ -350,40 +356,97 @@ export function applyEditorDecorations(
 	);
 
 	const commentNumbers = numberComments(annotations, outcomes);
-	const builder = new RangeSetBuilder<Decoration>();
+	// Collected rather than built in order: the block and end-of-text
+	// decorations below are positioned from the document, not from the sorted
+	// annotation ranges, so Decoration.set does the ordering.
+	const items: Array<Range<Decoration>> = [];
 	for (const r of ranges) {
 		if (r.from === r.to) {
 			const styled = settings.commentsFormattingEnabled;
 			const number = commentNumbers.get(r.annotation.id);
-			builder.add(
-				r.from,
-				r.to,
+			items.push(
 				Decoration.widget({
 					widget: new CommentMarkerWidget(
 						r.annotation.id,
 						markerClasses() + (styled ? '' : ' mdann-marker-plain'),
 						styled
-							? highlightStyleText(r.annotation.type, r.annotation.format, settings)
+							? highlightStyleText(r.annotation.type, r.annotation.category, settings)
 							: '',
 						number !== undefined ? String(number) : '',
 						() => onMarkerClick(r.annotation.id),
 					),
 					side: 1,
-				}),
+				}).range(r.from),
 			);
 			continue;
 		}
-		builder.add(
-			r.from,
-			r.to,
+		items.push(
 			Decoration.mark({
-				class: highlightClasses(r.annotation.type, r.annotation.format, settings),
+				class: highlightClasses(r.annotation.type, r.annotation.category, settings),
 				attributes: {
 					'data-mdann-id': r.annotation.id,
-					style: highlightStyleText(r.annotation.type, r.annotation.format, settings),
+					style: highlightStyleText(r.annotation.type, r.annotation.category, settings),
 				},
-			}),
+			}).range(r.from, r.to),
 		);
 	}
-	view.dispatch({ effects: setAnnotationDecorations.of(builder.finish()) });
+
+	addBlockAndEndLine(view, items, settings);
+	view.dispatch({
+		effects: setAnnotationDecorations.of(Decoration.set(items, true)),
+	});
+}
+
+// The two document-level decorations: the collapsed %%md-annotation block and
+// the rule under the last line of body text. Both are derived from the block's
+// position, so they are worked out together.
+function addBlockAndEndLine(
+	view: EditorView,
+	items: Array<Range<Decoration>>,
+	settings: MdAnnotationSettings,
+): void {
+	if (!settings.hideAnnotationBlock && !settings.bodyEndLineEnabled) return;
+	const doc = view.state.doc;
+	const block = findBlockRange(doc.toString());
+	// The block always ends the note, so body text is everything above it.
+	const bodyEnd = block ? block.start : doc.length;
+
+	if (settings.bodyEndLineEnabled) {
+		const line = lastNonBlankLineBefore(view, bodyEnd);
+		if (line !== null) {
+			const color = bodyEndLineColor(
+				settings,
+				view.dom.ownerDocument.body.classList.contains('theme-dark'),
+			);
+			items.push(
+				Decoration.line({
+					class: BODY_END_LINE_CLASS,
+					...(color === '' ? {} : { attributes: { style: `--mdann-end-line: ${color};` } }),
+				}).range(line),
+			);
+		}
+	}
+
+	// A block replacement has to cover whole lines, which findBlockRange
+	// guarantees: it spans from the start of the %%md-annotation line to the
+	// end of the closing %% line.
+	if (settings.hideAnnotationBlock && block && block.end > block.start) {
+		items.push(Decoration.replace({ block: true }).range(block.start, block.end));
+	}
+}
+
+// Start offset of the last line at or before `bodyEnd` that has any
+// non-whitespace on it — where the end-of-text rule is drawn. Null for a note
+// with no body text at all (nothing has ended, so nothing is marked).
+function lastNonBlankLineBefore(view: EditorView, bodyEnd: number): number | null {
+	const doc = view.state.doc;
+	let lineNumber = doc.lineAt(Math.max(0, Math.min(bodyEnd, doc.length))).number;
+	// A block starts on its own line, so the line containing `bodyEnd` is the
+	// block's first line rather than body text; step off it.
+	if (bodyEnd < doc.length && doc.line(lineNumber).from === bodyEnd) lineNumber--;
+	for (; lineNumber >= 1; lineNumber--) {
+		const line = doc.line(lineNumber);
+		if (line.text.trim() !== '') return line.from;
+	}
+	return null;
 }

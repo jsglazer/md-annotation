@@ -3,9 +3,9 @@
 // unparseable block lines needing attention (e.g. after a sync conflict).
 //
 // A toolbar at the top (modelled on the core Outline panel) narrows the list:
-// a search box over the Note/Comment text, a format filter built from the
-// identifiers actually present in the active note, and First/Last buttons that
-// scroll the list to either end.
+// a search box over the annotated text and notes, a category filter built from
+// the identifiers actually present in the active note, and First/Last buttons
+// that scroll the list to either end.
 
 import type { App, WorkspaceLeaf } from 'obsidian';
 import { ItemView, Modal, Notice, setIcon } from 'obsidian';
@@ -21,16 +21,16 @@ export const SIDEBAR_VIEW_TYPE = 'md-annotation-sidebar';
 const FLASH_MS = 1200;
 
 // Filter identity for one annotation. Comments using the dedicated comment
-// style carry no format name, so they get their own value; prefixes keep a
-// format literally named "Comment" distinct from the comment style itself.
+// style carry no category name, so they get their own value; prefixes keep a
+// category literally named "Comment" distinct from the comment style itself.
 const COMMENT_FILTER = 'c:';
 
 function filterValue(annotation: Annotation): string {
-	return annotation.format === '' ? COMMENT_FILTER : `f:${annotation.format}`;
+	return annotation.category === '' ? COMMENT_FILTER : `f:${annotation.category}`;
 }
 
 function filterLabel(annotation: Annotation): string {
-	return annotation.format === '' ? 'Comment' : annotation.format;
+	return annotation.category === '' ? 'Comment' : annotation.category;
 }
 
 export class AnnotationSidebarView extends ItemView {
@@ -46,7 +46,7 @@ export class AnnotationSidebarView extends ItemView {
 	private freshOpen = true;
 	// Toolbar state, kept across re-renders (the panel rebuilds on every change).
 	private searchQuery = '';
-	private formatFilter = '';
+	private categoryFilter = '';
 
 	constructor(
 		leaf: WorkspaceLeaf,
@@ -183,10 +183,14 @@ export class AnnotationSidebarView extends ItemView {
 		return shown === total ? `${name} (${shown})` : `${name} (${shown} of ${total})`;
 	}
 
+	// The search box covers both halves of an entry: the note/comment you wrote
+	// AND the annotated text itself (selector.exact), so searching for a phrase
+	// you highlighted finds it even when you never wrote a note about it.
 	private passesFilters(annotation: Annotation): boolean {
-		if (this.formatFilter !== '' && filterValue(annotation) !== this.formatFilter) return false;
+		if (this.categoryFilter !== '' && filterValue(annotation) !== this.categoryFilter) return false;
 		if (this.searchQuery === '') return true;
-		return annotation.comment.toLowerCase().includes(this.searchQuery);
+		if (annotation.comment.toLowerCase().includes(this.searchQuery)) return true;
+		return annotation.selector.exact.toLowerCase().includes(this.searchQuery);
 	}
 
 	// ── Toolbar ──────────────────────────────────────────────────────────────
@@ -194,13 +198,13 @@ export class AnnotationSidebarView extends ItemView {
 	private renderToolbar(root: HTMLElement, annotations: ReadonlyArray<Annotation>): void {
 		const bar = root.createDiv({ cls: 'mdann-toolbar' });
 
-		// Row 1 — search over the Note/Comment text.
+		// Row 1 — search over the annotated text and the Note/Comment text.
 		const searchRow = bar.createDiv({ cls: 'mdann-toolbar-row' });
 		const search = searchRow.createEl('input', {
 			cls: 'mdann-search-input',
 			attr: {
 				type: 'search',
-				placeholder: 'Search notes and comments…',
+				placeholder: 'Search text, notes and comments…',
 				spellcheck: 'false',
 			},
 		});
@@ -210,7 +214,7 @@ export class AnnotationSidebarView extends ItemView {
 			this.render();
 		});
 
-		// Row 2 — format filter (left), First / Last (center, right).
+		// Row 2 — category filter (left), First / Last (center, right).
 		const controlRow = bar.createDiv({ cls: 'mdann-toolbar-row' });
 		this.renderFilterSelect(controlRow, annotations);
 
@@ -231,7 +235,7 @@ export class AnnotationSidebarView extends ItemView {
 
 	private renderFilterSelect(row: HTMLElement, annotations: ReadonlyArray<Annotation>): void {
 		const select = row.createEl('select', { cls: 'dropdown mdann-filter-select' });
-		select.createEl('option', { text: 'All formats', attr: { value: '' } });
+		select.createEl('option', { text: 'All categories', attr: { value: '' } });
 
 		// Identifiers present in this note, comment style first, then names A→Z.
 		const present = new Map<string, string>();
@@ -245,11 +249,11 @@ export class AnnotationSidebarView extends ItemView {
 			select.createEl('option', { text: label, attr: { value } });
 		}
 
-		// A filter whose format vanished from the note falls back to "All".
-		if (this.formatFilter !== '' && !present.has(this.formatFilter)) this.formatFilter = '';
-		select.value = this.formatFilter;
+		// A filter whose category vanished from the note falls back to "All".
+		if (this.categoryFilter !== '' && !present.has(this.categoryFilter)) this.categoryFilter = '';
+		select.value = this.categoryFilter;
 		select.addEventListener('change', () => {
-			this.formatFilter = select.value;
+			this.categoryFilter = select.value;
 			this.render();
 		});
 	}
@@ -371,9 +375,9 @@ export class AnnotationSidebarView extends ItemView {
 				: annotation.selector.exact;
 		const chip = quote.createEl('span', {
 			text: isPointComment ? 'comment marker' : excerpt === '' ? '(empty quote)' : excerpt,
-			cls: highlightClasses(annotation.type, annotation.format, this.plugin.settings),
+			cls: highlightClasses(annotation.type, annotation.category, this.plugin.settings),
 		});
-		chip.setCssProps(highlightStyleVars(annotation.type, annotation.format, this.plugin.settings));
+		chip.setCssProps(highlightStyleVars(annotation.type, annotation.category, this.plugin.settings));
 		// Line number for a matched comment entry (Update001 "Show line number in
 		// Comment SB entry"), top right of the box since Update003.
 		if (annotation.type === 'comment' && outcome?.status === 'matched') {
@@ -391,11 +395,11 @@ export class AnnotationSidebarView extends ItemView {
 			card.createEl('div', { text: reason, cls: 'mdann-orphan-reason' });
 		}
 
-		// Highlights and comments both get a format selector so an annotation can
-		// be reassigned after creation (formats are keyed by name). Comments also
-		// offer the dedicated "Comment" style (the empty format name). The status
+		// Highlights and comments both get a category selector so an annotation can
+		// be reassigned after creation (categories are keyed by name). Comments also
+		// offer the dedicated "Comment" style (the empty category name). The status
 		// and delete controls live in the same row, as icon-only buttons.
-		this.renderFormatSelector(card, path, annotation, isOrphan);
+		this.renderCategorySelector(card, path, annotation, isOrphan);
 
 		const comment = card.createEl('textarea', {
 			cls: 'mdann-comment-input',
@@ -425,38 +429,38 @@ export class AnnotationSidebarView extends ItemView {
 		}
 	}
 
-	// A format dropdown bound to one annotation, plus (in the same row) the
+	// A category dropdown bound to one annotation, plus (in the same row) the
 	// status toggle and delete icon buttons. Comments lead with a "Comment"
-	// option (the dedicated comment style, stored as the empty format name).
-	private renderFormatSelector(
+	// option (the dedicated comment style, stored as the empty category name).
+	private renderCategorySelector(
 		card: HTMLElement,
 		path: string,
 		annotation: Annotation,
 		isOrphan: boolean,
 	): void {
-		const row = card.createDiv({ cls: 'mdann-format-select-row' });
-		row.createEl('span', { text: 'Format', cls: 'mdann-format-select-label' });
-		const select = row.createEl('select', { cls: 'dropdown mdann-format-select' });
+		const row = card.createDiv({ cls: 'mdann-category-select-row' });
+		row.createEl('span', { text: 'Category', cls: 'mdann-category-select-label' });
+		const select = row.createEl('select', { cls: 'dropdown mdann-category-select' });
 
 		if (annotation.type === 'comment') {
 			const def = select.createEl('option', { text: 'Comment', attr: { value: '' } });
-			if (annotation.format === '') def.selected = true;
+			if (annotation.category === '') def.selected = true;
 		}
-		const names = Object.keys(this.plugin.settings.formatStyles);
-		// Surface a stored-but-unknown format name so it is not silently dropped.
-		if (annotation.format !== '' && !names.includes(annotation.format)) {
+		const names = Object.keys(this.plugin.settings.categoryStyles);
+		// Surface a stored-but-unknown category name so it is not silently dropped.
+		if (annotation.category !== '' && !names.includes(annotation.category)) {
 			const missing = select.createEl('option', {
-				text: `${annotation.format} (missing)`,
-				attr: { value: annotation.format },
+				text: `${annotation.category} (missing)`,
+				attr: { value: annotation.category },
 			});
 			missing.selected = true;
 		}
 		for (const name of names) {
 			const option = select.createEl('option', { text: name, attr: { value: name } });
-			if (name === annotation.format) option.selected = true;
+			if (name === annotation.category) option.selected = true;
 		}
 		select.addEventListener('change', () => {
-			this.plugin.setFormat(path, annotation.id, select.value);
+			this.plugin.setCategory(path, annotation.id, select.value);
 		});
 
 		if (!isOrphan) {
