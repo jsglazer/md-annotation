@@ -9,17 +9,20 @@ MD Annotation is the delimiter-free successor to [Annotation Manager](https://gi
 ## How it works
 
 - **Anchoring** — every highlight is stored as a W3C-style [TextQuoteSelector](https://www.w3.org/TR/annotation-model/#text-quote-selector): the exact quote plus ~32 characters of surrounding context on each side. A staged matcher (exact → context-anchored → fuzzy similarity) re-finds each highlight every time the note changes.
-- **Storage** — annotations live in a comment block at the bottom of the note, one compact JSON object per line. The `format` field stores the format's *name* from settings (e.g. `"Yellow"`, `"Key"`), so the block stays human-readable:
+- **Storage** — annotations live in a comment block at the bottom of the note, one compact JSON object per line. The `category` field stores the category's *name* from settings (e.g. `"Yellow"`, `"Key"`), so the block stays human-readable:
 
   ```
   %%md-annotation
-  {"id":"…","type":"highlight","format":"Yellow","selector":{…},…}
-  {"id":"…","type":"comment","format":"","selector":{"exact":"",…},"comment":"…",…}
+  {"id":"…","type":"highlight","category":"Yellow","selector":{…},…}
+  {"id":"…","type":"comment","category":"","selector":{"exact":"",…},"comment":"…",…}
   %%
   ```
 
-  Line-delimited JSON means a sync or Git merge conflict corrupts at most one line — every other annotation still loads, and the damaged line is preserved verbatim and flagged in the sidebar instead of being deleted.
+  Line-delimited JSON means a sync or Git merge conflict corrupts at most one line — every other annotation still loads, and the damaged line is preserved verbatim and flagged in the sidebar instead of being deleted. The block can be **hidden from view** (see [Note layout](#note-layout)) without moving it out of the file.
+
+  > Before v1.0.20 this field was called `format`. Both spellings are read, and a note still on the old key is rewritten onto `category` the first time the plugin parses it — no action needed, and nothing else in the line changes.
 - **Rendering** — highlights are applied transiently: CodeMirror decorations in Live Preview / Source mode, wrapped spans in Reading View. Nothing is ever written into the body text.
+- **Writing back** — when the plugin has to update the block (a self-healed selector, a comment you typed, a status change) and the note is open for editing, the edit goes **through that editor** rather than to disk behind it, outside the undo history. Obsidian therefore has nothing to merge, so editing near an annotation no longer raises *"File modified externally, merging changes automatically"*, and ⌘Z still undoes your own typing. Notes no editor holds are written to the vault as before.
 - **Tables** — Obsidian renders a table as its own block, so annotations inside one are drawn through the same path Reading View uses rather than as editor decorations. The plugin works out which cell it is looking at by matching the rendered table's shape back to the table in the note, then places the annotation at its exact offset within that cell. If a note contains two structurally identical tables there is no way to tell them apart, so it leaves those annotations undrawn rather than risk putting them in the wrong table — they stay intact and editable in the sidebar.
 - **Margin cards** — the optional gutter draws each note as a card in the margin, level with the line it belongs to. In the editor the positions come from CodeMirror's own geometry; in Reading View they are measured from the rendered spans. Both share the same card, so a note reads and edits identically wherever you are.
 - **Self-healing** — when an edit shifts a highlight and it re-resolves with high confidence, the refreshed selector is saved back automatically. Low-confidence or ambiguous matches are flagged as *orphaned* — the plugin never guesses. **Fix orphans** searches again at a lower confidence bar when you ask it to (see below).
@@ -29,24 +32,25 @@ MD Annotation is the delimiter-free successor to [Annotation Manager](https://gi
 
 The two are distinguished by whether text is selected when you run the single **Annotate** command:
 
-- **Annotation** — text is selected → the selection is highlighted in one of your formats.
+- **Annotation** — text is selected → the selection is highlighted in one of your categories.
 - **Comment** — nothing is selected → a small 💬 marker icon is inserted at the cursor, anchored purely by its surrounding context (an empty-quote point selector). Click the marker to open the sidebar and write the comment.
 
 ## Features
 
-- **Highlights** with unlimited custom formats — per-format Use toggle, font/background colors (each with its own enable checkbox) per light/dark theme, and an optional font size for the highlighted text
-- **Point comments** — a **numbered** marker icon at any spot in the text, no selection needed; styled by the dedicated comment format or any annotation format
-- **Sidebar** listing every annotation of the active note: **click an entry to jump to it in the text**, edit comments, and **reassign an annotation (or comment) to a different format** via a dropdown — with open/closed status (an outlined square, filled once closed) and delete sitting beside it as icon buttons. Comment entries show their **line number in the top right** of the card.
+- **Highlights** with unlimited custom categories — per-category Use toggle, font/background colors (each with its own enable checkbox) per light/dark theme, and an optional font size for the highlighted text
+- **Point comments** — a **numbered** marker icon at any spot in the text, no selection needed; styled by the dedicated comment category or any annotation category
+- **Sidebar** listing every annotation of the active note: **click an entry to jump to it in the text**, edit comments, and **reassign an annotation (or comment) to a different category** via a dropdown — with open/closed status (an outlined square, filled once closed) and delete sitting beside it as icon buttons. Comment entries show their **line number in the top right** of the card.
 - **Works inside tables** — highlights and comments anchor in table cells and render there in Live Preview, Source mode and Reading View, like anywhere else in the note
-- **Sidebar toolbar** — **search** across every note/comment box, a **format filter** built from the identifiers actually present in the open note (so you can show only your `Key` or `Define` entries), and **First / Last** buttons that scroll the list to either end. The toolbar is **pinned to the top** of the panel, so it stays reachable however far down the list you scroll.
+- **Sidebar toolbar** — **search** across both the **annotated text** and every note/comment box (so a phrase you highlighted is findable even with no note attached), a **category filter** built from the identifiers actually present in the open note (so you can show only your `Key` or `Define` entries), and **First / Last** buttons that scroll the list to either end. The toolbar is **pinned to the top** of the panel, so it stays reachable however far down the list you scroll.
 - **Margin gutter** — show notes as **editable cards in the margin**, level with the line they're anchored to and joined to it by a leader line. Annotations and comments switch on separately and can occupy **opposite margins**; the width is yours to set. Works in **Live Preview, Source mode _and_ Reading View**. Click a card to scroll the sidebar to the same entry. A gutter drops itself automatically while a pane is too narrow to spare the room.
 - **Two-way navigation** — click annotated text or a comment marker to jump to its sidebar entry (and focus its comment box); on open the sidebar scrolls to the entry nearest the cursor. Clicking into an entry's note box flashes that annotation in the text so you can see what you're writing about.
 - **Text ⇄ sidebar sync** — the sidebar tracks the entry nearest the cursor as you move through the note. On by default; switchable from settings or the **Sync text and sidebar** command (the two are one state).
-- **Share formats between vaults** — export every format to the clipboard as JSON and import it in another vault, merging into what's already there or replacing the set outright. Obsidian Sync replicates a vault to your *other devices*, never to your *other vaults*, so this is the way formats travel.
-- **Show/hide formatting** on demand — commands and settings toggles to hide annotation colors, comment colors, or comment markers entirely
-- **Format renames propagate** — rename a format in settings and every note referencing the old name is rewritten automatically
-- **A command per format** — each format automatically gets its own **Apply - _name_** command (usable from the Command Palette, a hotkey, or a toolbar); adding, renaming, or deleting a format creates or removes its command instantly
-- **Note Toolbar integration** — a paste-in script builds a live "apply format" menu from those commands, so you can highlight the selection (or drop a comment at the cursor) from a [Note Toolbar](https://github.com/chrisgurney/obsidian-note-toolbar) button (see below). A toolbar button bound to a gutter toggle can also **change color while that gutter is on**, so the toolbar shows its state at a glance.
+- **Share categories between vaults** — export every category to the clipboard as JSON and import it in another vault, merging into what's already there or replacing the set outright. Obsidian Sync replicates a vault to your *other devices*, never to your *other vaults*, so this is the way categories travel.
+- **Show/hide colors** on demand — commands and settings toggles to hide annotation colors, comment colors, or comment markers entirely
+- **Hide the annotation block** — collapse the `%%md-annotation` JSON out of Live Preview and Source mode so the foot of the note reads as clean as it prints, with an optional **rule under the last line of text** (colour configurable per theme) marking where the note ends
+- **Category renames propagate** — rename a category in settings and every note referencing the old name is rewritten automatically
+- **A command per category** — each category automatically gets its own **Apply - _name_** command (usable from the Command Palette, a hotkey, or a toolbar); adding, renaming, or deleting a category creates or removes its command instantly
+- **Note Toolbar integration** — a paste-in script builds a live "apply category" menu from those commands, so you can highlight the selection (or drop a comment at the cursor) from a [Note Toolbar](https://github.com/chrisgurney/obsidian-note-toolbar) button (see below). A toolbar button bound to a gutter toggle can also **change color while that gutter is on**, so the toolbar shows its state at a glance.
 - **Queryable from Dataview / Datacore** — a public JS API for `dataviewjs` / `datacorejs` / `datacorejsx` blocks (see below)
 - **Orphan repair** — orphaned annotations get their own sidebar section. **Fix orphans** searches the note again at a lower confidence bar and re-anchors everything it can place unambiguously; anything still in doubt waits for you to select the new text and re-anchor it with one click. Optionally automatic.
 - **Highlights LaTeX** — annotations spanning inline maths (`$x > 0$`) are highlighted in Live Preview and Reading View as well as Source mode, formula included
@@ -57,10 +61,12 @@ The two are distinguished by whether text is selected when you run the single **
 
 | Command | Action |
 | --- | --- |
-| **Annotate** | Selection → highlight it (pick a format if more than one is enabled); no selection → insert a comment marker at the cursor |
-| **Apply - _name_** (one per format) | Apply that specific format directly: selection → highlight it; no selection → drop a comment marker in that format's color. Registered and removed automatically as formats change. |
-| **Show/hide annotation formats** | Toggle highlight colors on annotated text |
-| **Show/hide comment formats** | Toggle colors on comment markers |
+| **Annotate** | Selection → highlight it (pick a category if more than one is enabled); no selection → insert a comment marker at the cursor |
+| **Apply - _name_** (one per category) | Apply that specific category directly: selection → highlight it; no selection → drop a comment marker in that category's color. Registered and removed automatically as categories change. |
+| **Show/hide annotation colors** | Toggle highlight colors on annotated text |
+| **Show/hide comment colors** | Toggle colors on comment markers |
+| **Show/hide the annotation block** | Collapse the `%%md-annotation` block at the foot of the note out of Live Preview and Source mode. Flips the same persisted setting shown on the General tab. |
+| **Show/hide the end-of-text line** | Draw a rule under the last line of body text. Flips the same persisted setting shown on the General tab. |
 | **Show/hide annotations in the gutter** | Toggle the margin cards for annotations. Flips the same persisted setting shown on the Gutter tab. |
 | **Show/hide comments in the gutter** | Toggle the margin cards for comments. Flips the same persisted setting shown on the Gutter tab. |
 | **Sync text and sidebar** | Toggle continuous syncing of the sidebar to the entry nearest the cursor. Flips the same persisted setting shown on the General tab. |
@@ -73,9 +79,9 @@ The Annotate action is also in the editor context menu — shown as *Annotate se
 
 Settings are organized into **General / Annotations / Comments / Gutter** tabs:
 
-- **General** — the author name recorded on every annotation you create; three **navigation** toggles (all on by default); the **orphaned annotations** toggle; and **format export / import**
-- **Annotations** — a formatting visibility toggle, plus a per-format grid: Use checkbox, editable name, Fr/Bg colors for light and dark themes (each color has its own enable checkbox), font size, and a live sample-text example. Renaming a format here also updates every annotated note.
-- **Comments** — hide-markers and formatting toggles, plus the dedicated comment format's Fr/Bg colors per theme with a live example
+- **General** — the author name recorded on every annotation you create; three **navigation** toggles (all on by default); the **note layout** options; the **orphaned annotations** toggle; and **category export / import**
+- **Annotations** — a colour visibility toggle, plus a per-category grid: Use checkbox, editable name, Fr/Bg colors for light and dark themes (each color has its own enable checkbox), font size, and a live sample-text example. Renaming a category here also updates every annotated note.
+- **Comments** — hide-markers and colour toggles, plus the dedicated comment category's Fr/Bg colors per theme with a live example
 - **Gutter** — everything about the margin cards: show-toggles and left/right margin choice for annotations and for comments independently, the shared width, a card font size per type, and the optional Note Toolbar button highlight (see below)
 
 ### The margin gutter
@@ -87,7 +93,7 @@ Notes can be shown as cards in the page margin instead of (or as well as) in the
 | **Show annotations / comments in the gutter** | Switch each type on separately (also toggled by its command) |
 | **Annotation / comment gutter side** | Which margin each type uses — they can sit in opposite margins |
 | **Gutter width** | Room each gutter takes from the note, 140–480 px |
-| **Annotation / comment card font size** | Text size inside the margin cards, set per type. Independent of a format's own Size, which styles the highlighted text and the sidebar — so the cards can be sized without touching either. Blank uses the theme default |
+| **Annotation / comment card font size** | Text size inside the margin cards, set per type. Independent of a category's own Size, which styles the highlighted text and the sidebar — so the cards can be sized without touching either. Blank uses the theme default |
 | **Only on notes with annotations** | Reserve the margin per note instead of vault-wide — on by default |
 
 It works in Live Preview, Source mode and Reading View. Clicking a card scrolls the sidebar to the matching entry when the sidebar is already open. Orphaned annotations have no line to sit beside, so they stay in the sidebar where they can be re-anchored.
@@ -97,6 +103,17 @@ It works in Live Preview, Source mode and Reading View. Clicking a card scrolls 
 ### Note Toolbar button highlight
 
 If [Note Toolbar](https://github.com/chrisgurney/obsidian-note-toolbar) is installed, the **Gutter** tab can bind each *Show/hide … in the gutter* command to one of its buttons: pick the toolbar and the button, set Fr/Bg colors per light and dark theme, and that button takes those colors for as long as the gutter is showing. A gutter that's off leaves its button entirely to Note Toolbar, so "on" reads as the exception.
+
+### Note layout
+
+Two General-tab options control what the note itself looks like around the annotation data. Both are **off by default** and both have a command, so they can be flipped from a hotkey or a toolbar button.
+
+| Setting / command | Effect |
+| --- | --- |
+| **Hide the annotation block** — *Show/hide the annotation block* | Collapses the whole `%%md-annotation` block (markers and JSON) out of Live Preview and Source mode. Reading View never showed it, since Obsidian hides `%%` comments there. The block is only hidden from view — it is still in the file, still written to, and still the source of truth |
+| **Show a line at the end of the text** — *Show/hide the end-of-text line* | Draws a rule under the last line of body text, giving the note a visible bottom edge once the block is hidden. Placed above the block, or at the true end of the note when there is none. Blank lines at the foot are skipped |
+
+The rule's colour is set per theme, with the same checkbox / swatch / hex cells as the annotation categories. Uncheck a theme to fall back to whatever divider colour the theme itself uses.
 
 ### Navigation toggles
 
@@ -116,31 +133,33 @@ An annotation is *orphaned* when the text it was anchored to has changed too muc
 
 **Fix orphans automatically** (General → Orphaned annotations) runs the same pass whenever a note is read, so orphans repair themselves without the button. It is **off by default** — a repair at the lower bar can move a highlight without you seeing it happen, and an orphan you can see and fix is easier to live with than one that quietly went somewhere else.
 
-### Sharing formats between vaults
+### Sharing categories between vaults
 
-Formats are stored in the vault's own `data.json`. Obsidian Sync replicates one vault to that same vault on your other devices — it never bridges two different vaults — so formats added in one vault never show up in another on their own. To move them:
+Categories are stored in the vault's own `data.json`. Obsidian Sync replicates one vault to that same vault on your other devices — it never bridges two different vaults — so categories added in one vault never show up in another on their own. To move them:
 
-1. In the source vault: **Settings → MD Annotation → General → Export formats → Copy to clipboard**.
-2. In the target vault: **Import formats → Paste and import**, then choose **Merge** or **Replace all**.
+1. In the source vault: **Settings → MD Annotation → General → Export categories → Copy to clipboard**.
+2. In the target vault: **Import categories → Paste and import**, then choose **Merge** or **Replace all**.
 
-**Merge** adds only the formats the target vault doesn't already have, leaving any format you've tuned there untouched. **Replace all** swaps the whole set and is confirmed separately — annotations referencing a format that isn't in the payload fall back to the first enabled format until you reassign them.
+**Merge** adds only the categories the target vault doesn't already have, leaving any category you've tuned there untouched. **Replace all** swaps the whole set and is confirmed separately — annotations referencing a category that isn't in the payload fall back to the first enabled category until you reassign them.
 
-## Note Toolbar: an "apply format" menu
+## Note Toolbar: an "apply category" menu
 
-Each format has its own `md-annotation:apply-<name>` command, so [Note Toolbar](https://github.com/chrisgurney/obsidian-note-toolbar) can present all your formats in one pop-up menu that stays in sync automatically — no manual toolbar editing when you add or rename a format.
+Each category has its own `md-annotation:apply-<name>` command, so [Note Toolbar](https://github.com/chrisgurney/obsidian-note-toolbar) can present all your categories in one pop-up menu that stays in sync automatically — no manual toolbar editing when you add or rename a category.
 
 1. In Note Toolbar, enable **Other → Scripting**, then add a toolbar item of type **JavaScript**.
 2. Paste in the script from [`docs/note-toolbar-menu.js`](docs/note-toolbar-menu.js).
 
-Clicking the item opens a menu of every format; picking one runs its command against the active editor — selection → highlight, bare cursor → comment. The script discovers formats from the live command list, so nothing needs updating as formats change.
+Clicking the item opens a menu of every category; picking one runs its command against the active editor — selection → highlight, bare cursor → comment. The script discovers categories from the live command list, so nothing needs updating as categories change.
 
-Scripts can also read the format list directly from the plugin API:
+Scripts can also read the category list directly from the plugin API:
 
 ```js
 const api = app.plugins.plugins['md-annotation'].api;
-api.getFormatNames();               // e.g. ['Yellow', 'Key', 'EditThis']
-api.getFormatCommandId('EditThis'); // 'md-annotation:apply-EditThis' (or null)
+api.getCategoryNames();               // e.g. ['Yellow', 'Key', 'EditThis']
+api.getCategoryCommandId('EditThis'); // 'md-annotation:apply-EditThis' (or null)
 ```
+
+`getFormatNames()` and `getFormatCommandId()` are kept as aliases of these two, so scripts written before v1.0.20 keep working unchanged.
 
 ## Querying with Dataview / Datacore
 
@@ -152,16 +171,18 @@ await api.getAnnotations(path);   // Annotation[] for one note
 await api.getAllAnnotations();    // [{ path, annotations }] for the whole vault
 ```
 
-Each `Annotation` has `id`, `type` (`'highlight'` | `'comment'`), `format`, `selector` (`{ exact, prefix, suffix }`), `comment`, `author`, `status` (`'open'` | `'closed'`), and `dateCreate` / `dateModified` / `dateClosed`. Returned objects are deep copies — mutate them freely without touching plugin state or note data.
+Each `Annotation` has `id`, `type` (`'highlight'` | `'comment'`), `category`, `selector` (`{ exact, prefix, suffix }`), `comment`, `author`, `status` (`'open'` | `'closed'`), and `dateCreate` / `dateModified` / `dateClosed`. Returned objects are deep copies — mutate them freely without touching plugin state or note data.
+
+For compatibility with script blocks written before v1.0.20, each returned object **also** carries a `format` key holding the same value as `category`.
 
 ### DataviewJS
 
 ```dataviewjs
 const api = app.plugins.plugins['md-annotation'].api;
 const anns = await api.getAnnotations(dv.current().file.path);
-dv.table(['Quote', 'Format', 'Comment', 'Author', 'Created'],
+dv.table(['Quote', 'Category', 'Comment', 'Author', 'Created'],
   anns.filter(a => a.status === 'open')
-      .map(a => [a.selector.exact || '(comment)', a.format || 'Comment', a.comment, a.author, a.dateCreate.slice(0, 10)]));
+      .map(a => [a.selector.exact || '(comment)', a.category || 'Comment', a.comment, a.author, a.dateCreate.slice(0, 10)]));
 ```
 
 Vault-wide — every open annotation across all notes:
@@ -169,10 +190,10 @@ Vault-wide — every open annotation across all notes:
 ```dataviewjs
 const api = app.plugins.plugins['md-annotation'].api;
 const files = await api.getAllAnnotations();
-dv.table(['Note', 'Type', 'Quote / Comment', 'Format'],
+dv.table(['Note', 'Type', 'Quote / Comment', 'Category'],
   files.flatMap(f => f.annotations
     .filter(a => a.status === 'open')
-    .map(a => [dv.fileLink(f.path), a.type, a.selector.exact || a.comment, a.format || 'Comment'])));
+    .map(a => [dv.fileLink(f.path), a.type, a.selector.exact || a.comment, a.category || 'Comment'])));
 ```
 
 ### DatacoreJS
@@ -181,8 +202,8 @@ dv.table(['Note', 'Type', 'Quote / Comment', 'Format'],
 const api = app.plugins.plugins['md-annotation'].api;
 const anns = await api.getAnnotations(dc.currentPath());
 return dc.table(
-  ['Quote', 'Format', 'Comment', 'Status'],
-  anns.map(a => [a.selector.exact || '(comment)', a.format || 'Comment', a.comment, a.status]),
+  ['Quote', 'Category', 'Comment', 'Status'],
+  anns.map(a => [a.selector.exact || '(comment)', a.category || 'Comment', a.comment, a.status]),
 );
 ```
 
@@ -197,7 +218,7 @@ function Annotations() {
     <dc.Group>
       {anns.map(a => (
         <div key={a.id}>
-          <b>{a.format || 'Comment'}</b>: {a.selector.exact || a.comment} <i>({a.status})</i>
+          <b>{a.category || 'Comment'}</b>: {a.selector.exact || a.comment} <i>({a.status})</i>
         </div>
       ))}
     </dc.Group>
