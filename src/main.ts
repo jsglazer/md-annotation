@@ -26,6 +26,8 @@ import { nearestAnnotationId } from './core/ordering';
 import { WriteQueue } from './core/queue';
 import type { MdAnnotationSettings } from './core/settings';
 import { isUnsafeKey, normalizeSettings, usableCategoryNames } from './core/settings';
+import type { AnnotationTransfer, PlacedAnnotation } from './core/transfer';
+import { buildTransfer, transferToAnnotations } from './core/transfer';
 import type { Annotation, AnnotationType, TextQuoteSelector } from './core/types';
 import { EditorGutter } from './editor/gutterLayer';
 import {
@@ -91,6 +93,11 @@ export default class MdAnnotationPlugin extends Plugin {
 	// so syncCategoryCommands can diff against settings and add/remove as they
 	// change.
 	private categoryCommandNames = new Set<string>();
+	// The last "Copy selection with annotations": the copied text plus the
+	// annotations covering it. Held in memory only — it is provenance for a
+	// paste in this session, not a document, so it deliberately does not
+	// survive a restart (and does not cross into another Obsidian window).
+	private transfer: AnnotationTransfer | null = null;
 
 	async onload(): Promise<void> {
 		this.settings = normalizeSettings(await this.loadData());
@@ -256,6 +263,23 @@ export default class MdAnnotationPlugin extends Plugin {
 				new Notice(
 					`Comments in the gutter ${this.settings.gutterCommentsEnabled ? 'shown' : 'hidden'}`,
 				);
+			},
+		});
+
+		this.addCommand({
+			id: 'copy-with-annotations',
+			name: 'Copy selection with annotations',
+			icon: 'copy',
+			editorCallback: (editor, ctx) => {
+				this.copyWithAnnotations(editor, ctx);
+			},
+		});
+		this.addCommand({
+			id: 'paste-with-annotations',
+			name: 'Paste with annotations',
+			icon: 'clipboard-paste',
+			editorCallback: (editor, ctx) => {
+				this.pasteWithAnnotations(editor, ctx);
 			},
 		});
 
@@ -785,6 +809,113 @@ export default class MdAnnotationPlugin extends Plugin {
 		}
 		this.notifyChange();
 		if (type === 'comment') void this.activateSidebar();
+	}
+
+	// ── Copy / paste with annotations ────────────────────────────────────────
+
+	// Stashes the selected text together with every annotation covering it, and
+	// puts the plain text on the system clipboard so an ordinary Ctrl+V still
+	// does the obvious thing.
+	private copyWithAnnotations(editor: Editor, ctx: MarkdownView | MarkdownFileInfo): void {
+		const path = ctx.file?.path;
+		if (path === undefined) return;
+		const from = editor.posToOffset(editor.getCursor('from'));
+		const to = editor.posToOffset(editor.getCursor('to'));
+		if (from === to) {
+			new Notice('Select some text to copy');
+			return;
+		}
+		const { body } = parseDocument(editor.getValue());
+		if (to > body.length) {
+			new Notice('The annotation block itself cannot be copied with annotations');
+			return;
+		}
+
+		const transfer = buildTransfer(body, this.placedAnnotations(path), from, to);
+		this.transfer = transfer;
+		void navigator.clipboard?.writeText(transfer.text).catch(() => undefined);
+		const n = transfer.annotations.length;
+		new Notice(
+			n === 0
+				? 'Copied — no annotations in the selection'
+				: `Copied with ${n} annotation${n === 1 ? '' : 's'}`,
+		);
+	}
+
+	// Inserts the stashed text at the cursor and writes its annotations into the
+	// destination note, re-anchored against the text as it now reads there.
+	private pasteWithAnnotations(editor: Editor, ctx: MarkdownView | MarkdownFileInfo): void {
+		const path = ctx.file?.path;
+		if (path === undefined) return;
+		const transfer = this.transfer;
+		if (!transfer) {
+			// eslint-disable-next-line obsidianmd/ui/sentence-case -- quotes the command's own name
+			new Notice('Nothing copied yet — run "Copy selection with annotations" first');
+			return;
+		}
+		const from = editor.posToOffset(editor.getCursor('from'));
+		const to = editor.posToOffset(editor.getCursor('to'));
+		const { body } = parseDocument(editor.getValue());
+		if (to > body.length) {
+			new Notice('Cannot paste into the annotation block');
+			return;
+		}
+
+		editor.replaceSelection(transfer.text);
+		const newBody = parseDocument(editor.getValue()).body;
+		const nowMs = Date.now();
+		const annotations = transferToAnnotations(transfer, {
+			body: newBody,
+			insertOffset: from,
+			ids: transfer.annotations.map(() => generateAnnotationId(nowMs, Math.random())),
+			nowIso: formatTimestamp(nowMs),
+		});
+		if (annotations.length > 0) {
+			this.queue.request(path, (text) =>
+				annotations.reduce((acc, a) => upsertAnnotation(acc, a), text),
+			);
+			// Optimistic in-memory placement so the highlights appear with the
+			// text rather than after the next re-resolve.
+			const state = this.states.get(path);
+			if (state) {
+				for (const [i, a] of annotations.entries()) {
+					const carried = transfer.annotations[i];
+					if (!carried) continue;
+					state.annotations.push(a);
+					state.outcomes.set(a.id, {
+						status: 'matched',
+						start: from + carried.start,
+						end: from + carried.end,
+						confidence: 1,
+						refreshedSelector: null,
+					});
+				}
+				this.decorateAllFor(path);
+			}
+			this.notifyChange();
+		}
+
+		const n = annotations.length;
+		new Notice(
+			n === 0
+				? 'Pasted — no annotations travelled with the text'
+				: `Pasted with ${n} annotation${n === 1 ? '' : 's'}`,
+		);
+	}
+
+	// Every annotation in `path` that currently resolves to a range, paired with
+	// that range. Orphans have no place in the text to copy from, so they are
+	// left behind.
+	private placedAnnotations(path: string): PlacedAnnotation[] {
+		const state = this.states.get(path);
+		if (!state) return [];
+		const placed: PlacedAnnotation[] = [];
+		for (const annotation of state.annotations) {
+			const outcome = state.outcomes.get(annotation.id);
+			if (outcome?.status !== 'matched') continue;
+			placed.push({ annotation, start: outcome.start, end: outcome.end });
+		}
+		return placed;
 	}
 
 	setComment(path: string, id: string, comment: string): void {

@@ -644,8 +644,13 @@ var WriteQueue = class {
 var GUTTER_MIN_WIDTH = 140;
 var GUTTER_MAX_WIDTH = 480;
 var GUTTER_DEFAULT_WIDTH = 220;
-function makeToolbarHighlight(light, dark) {
-  return { toolbarUuid: "", itemUuid: "", style: { light, dark } };
+function makeToolbarHighlight(onLight, onDark) {
+  return {
+    toolbarUuid: "",
+    itemUuid: "",
+    on: { light: colorOption(onLight), dark: colorOption(onDark) },
+    off: { light: colorOption(), dark: colorOption() }
+  };
 }
 function colorOption(color = "") {
   return { enabled: color !== "", color };
@@ -684,18 +689,9 @@ function defaultSettings() {
     gutterOnlyWhenAnnotated: true,
     gutterAnnotationsFontSize: "",
     gutterCommentsFontSize: "",
-    gutterAnnotationsToolbar: makeToolbarHighlight(
-      partStyle("", "#fff3a3"),
-      partStyle("", "#7a6f1f")
-    ),
-    gutterCommentsToolbar: makeToolbarHighlight(
-      partStyle("", "#c8e6c9"),
-      partStyle("", "#2e5d33")
-    ),
-    textClickJumpToolbar: makeToolbarHighlight(
-      partStyle("", "#fff3a3"),
-      partStyle("", "#7a6f1f")
-    ),
+    gutterAnnotationsToolbar: makeToolbarHighlight("#fff3a3", "#7a6f1f"),
+    gutterCommentsToolbar: makeToolbarHighlight("#c8e6c9", "#2e5d33"),
+    textClickJumpToolbar: makeToolbarHighlight("#fff3a3", "#7a6f1f"),
     autoRepairOrphans: false,
     syncTextAndSidebar: true,
     sidebarClickJumpsToText: true,
@@ -739,13 +735,26 @@ function readThemedPartStyles(v) {
   if (!r) return { light: partStyle(), dark: partStyle() };
   return { light: readPartStyle(r.light), dark: readPartStyle(r.dark) };
 }
+function readThemedColorOption(v, fallback) {
+  const r = asRecord(v);
+  if (!r) return fallback;
+  return { light: readColorOption(r.light), dark: readColorOption(r.dark) };
+}
 function readToolbarHighlight(v, fallback) {
   const r = asRecord(v);
   if (!r) return fallback;
+  let on = fallback.on;
+  if (asRecord(r.on)) {
+    on = readThemedColorOption(r.on, fallback.on);
+  } else if (asRecord(r.style)) {
+    const legacy = readThemedPartStyles(r.style);
+    on = { light: legacy.light.bg, dark: legacy.dark.bg };
+  }
   return {
     toolbarUuid: readString(r.toolbarUuid),
     itemUuid: readString(r.itemUuid),
-    style: asRecord(r.style) ? readThemedPartStyles(r.style) : fallback.style
+    on,
+    off: readThemedColorOption(r.off, fallback.off)
   };
 }
 function readCategoryStyle(v) {
@@ -935,9 +944,9 @@ function resolveStyle(annotationType, categoryName, settings) {
 function enabledColor(opt) {
   return opt.enabled && isValidHex(opt.color) ? opt.color : "";
 }
-function themedColors(style, dark) {
-  const part = dark ? style.dark : style.light;
-  return { fg: enabledColor(part.fr), bg: enabledColor(part.bg) };
+function toolbarHighlightColor(highlight, active, dark) {
+  const themed = active ? highlight.on : highlight.off;
+  return enabledColor(dark ? themed.dark : themed.light);
 }
 function bodyEndLineColor(settings, dark) {
   const opt = dark ? settings.bodyEndLineColor.dark : settings.bodyEndLineColor.light;
@@ -995,6 +1004,65 @@ function highlightClasses(annotationType, categoryName, settings) {
 }
 function markerClasses() {
   return `${MARKER_CLASS} ${COMMENT_CLASS}`;
+}
+
+// src/core/transfer.ts
+function buildTransfer(body, placed, from, to) {
+  const start = Math.max(0, Math.min(from, to));
+  const end = Math.min(body.length, Math.max(from, to));
+  const annotations = [];
+  for (const { annotation, start: aStart, end: aEnd } of placed) {
+    const point = aStart === aEnd;
+    if (point) {
+      if (aStart < start || aStart > end) continue;
+    } else if (aEnd <= start || aStart >= end) {
+      continue;
+    }
+    const clippedStart = Math.max(aStart, start) - start;
+    const clippedEnd = Math.min(aEnd, end) - start;
+    const carried = {
+      start: clippedStart,
+      end: clippedEnd,
+      type: annotation.type,
+      category: annotation.category,
+      comment: annotation.comment,
+      author: annotation.author,
+      status: annotation.status,
+      // Preserved: when the highlight was first made is a fact about the
+      // annotation, not about this copy. dateModified is set at paste.
+      dateCreate: annotation.dateCreate,
+      dateClosed: annotation.dateClosed
+    };
+    if (annotation.extras) carried.extras = { ...annotation.extras };
+    annotations.push(carried);
+  }
+  annotations.sort((a, b) => a.start - b.start || a.end - b.end);
+  return { version: 1, text: body.slice(start, end), annotations };
+}
+function transferToAnnotations(transfer, ctx) {
+  const out = [];
+  for (const [i, carried] of transfer.annotations.entries()) {
+    const id = ctx.ids[i];
+    if (id === void 0 || id === "") continue;
+    const start = ctx.insertOffset + carried.start;
+    const end = ctx.insertOffset + carried.end;
+    if (start < 0 || end > ctx.body.length || end < start) continue;
+    const annotation = {
+      id,
+      type: carried.type,
+      category: carried.category,
+      selector: captureSelector(ctx.body, start, end),
+      comment: carried.comment,
+      author: carried.author,
+      status: carried.status,
+      dateCreate: carried.dateCreate,
+      dateModified: ctx.nowIso,
+      dateClosed: carried.dateClosed
+    };
+    if (carried.extras) annotation.extras = { ...carried.extras };
+    out.push(annotation);
+  }
+  return out;
 }
 
 // src/editor/gutterCards.ts
@@ -2411,12 +2479,12 @@ var ToolbarHighlighter = class {
     var _a;
     this.clear();
     const targets = this.getTargets().filter(
-      (t) => t.active && t.highlight.toolbarUuid !== "" && t.highlight.itemUuid !== ""
+      (t) => t.highlight.toolbarUuid !== "" && t.highlight.itemUuid !== ""
     );
     if (targets.length === 0) return;
     const containers = this.toolbarContainers();
     if (containers.length === 0) return;
-    for (const { highlight } of targets) {
+    for (const { highlight, active } of targets) {
       const toolbar = rawToolbars(this.app).find((t) => t.uuid === highlight.toolbarUuid);
       if (!toolbar) continue;
       const index = rawItems(toolbar).findIndex((i) => i.uuid === highlight.itemUuid);
@@ -2426,11 +2494,10 @@ var ToolbarHighlighter = class {
         const target = (_a = container.querySelector(`li[data-index="${index}"]`)) == null ? void 0 : _a.firstElementChild;
         if (!(target instanceof HTMLElement)) continue;
         const dark = target.ownerDocument.body.classList.contains("theme-dark");
-        const { fg, bg } = themedColors(highlight.style, dark);
-        if (fg === "" && bg === "") continue;
+        const bg = toolbarHighlightColor(highlight, active, dark);
+        if (bg === "") continue;
         target.addClass(HIGHLIGHT_CLASS2);
-        if (bg !== "") target.style.setProperty("background-color", bg);
-        if (fg !== "") target.style.setProperty("color", fg);
+        target.style.setProperty("background-color", bg);
       }
     }
   }
@@ -2654,7 +2721,7 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
       return;
     }
     containerEl.createEl("p", {
-      text: "Pick the toolbar button that runs each toggle command below and it will take the colours below while that toggle is on, so the toolbar reads as pressed. A toggle that is off leaves its button to Note Toolbar.",
+      text: `Pick the toolbar button that runs each toggle command below and it will take the On colour while that toggle is on, so the toolbar reads as pressed, and the Off colour while it is off. Either colour left unticked leaves the button to Note Toolbar for that state \u2014 Off is unticked by default, so only "on" stands out. Backgrounds only: the icon and label colour stay Note Toolbar's.`,
       cls: "setting-item-description"
     });
     this.renderToolbarItemPicker(
@@ -2699,8 +2766,10 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
       });
     });
   }
-  // The two colour rows, laid out like the category grid so Fr/Bg per theme
-  // read the same way here as everywhere else in these settings.
+  // The three colour rows, laid out like the category grid so light/dark per
+  // button reads the same way here as everywhere else in these settings. The
+  // per-theme pair is On/Off rather than Fr/Bg: a toolbar button only ever
+  // takes a background from this plugin.
   renderToolbarHighlightGrid(containerEl) {
     const wrap = containerEl.createDiv("mdann-grid-wrap");
     const table = wrap.createEl("table", { cls: "mdann-grid-table" });
@@ -2712,7 +2781,10 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
     r1.createEl("th", { text: "Example", attr: { rowspan: "2" }, cls: "mdann-grid-sep" });
     const r2 = thead.createEl("tr");
     for (let i = 0; i < 4; i++) {
-      r2.createEl("th", { text: i % 2 === 0 ? "Fr" : "Bg", cls: i % 2 === 0 ? "mdann-grid-sep" : "" });
+      r2.createEl("th", {
+        text: i % 2 === 0 ? "On" : "Off",
+        cls: i % 2 === 0 ? "mdann-grid-sep" : ""
+      });
     }
     const tbody = table.createEl("tbody");
     this.renderToolbarHighlightRow(tbody, "Annotations", this.plugin.settings.gutterAnnotationsToolbar);
@@ -2726,13 +2798,15 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
     const refreshExample = () => {
       if (!exampleTd) return;
       exampleTd.empty();
-      const part = highlight.style[this.isDarkTheme() ? "dark" : "light"];
-      this.appendExampleSpan(exampleTd, label, enabledColor2(part.fr), enabledColor2(part.bg), "");
+      const theme = this.isDarkTheme() ? "dark" : "light";
+      this.appendExampleSpan(exampleTd, "On", "", enabledColor2(highlight.on[theme]), "");
+      exampleTd.appendText(" ");
+      this.appendExampleSpan(exampleTd, "Off", "", enabledColor2(highlight.off[theme]), "");
     };
     for (const theme of ["light", "dark"]) {
-      for (const field of ["fr", "bg"]) {
-        const td = tr.createEl("td", { cls: field === "fr" ? "mdann-grid-sep" : "" });
-        this.renderColorCell(td, highlight.style[theme][field], refreshExample);
+      for (const state of ["on", "off"]) {
+        const td = tr.createEl("td", { cls: state === "on" ? "mdann-grid-sep" : "" });
+        this.renderColorCell(td, highlight[state][theme], refreshExample);
       }
     }
     exampleTd = tr.createEl("td", { cls: "mdann-grid-example mdann-grid-sep" });
@@ -3771,6 +3845,11 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
     // so syncCategoryCommands can diff against settings and add/remove as they
     // change.
     this.categoryCommandNames = /* @__PURE__ */ new Set();
+    // The last "Copy selection with annotations": the copied text plus the
+    // annotations covering it. Held in memory only — it is provenance for a
+    // paste in this session, not a document, so it deliberately does not
+    // survive a restart (and does not cross into another Obsidian window).
+    this.transfer = null;
   }
   async onload() {
     this.settings = normalizeSettings(await this.loadData());
@@ -3919,6 +3998,22 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
         new import_obsidian6.Notice(
           `Comments in the gutter ${this.settings.gutterCommentsEnabled ? "shown" : "hidden"}`
         );
+      }
+    });
+    this.addCommand({
+      id: "copy-with-annotations",
+      name: "Copy selection with annotations",
+      icon: "copy",
+      editorCallback: (editor, ctx) => {
+        this.copyWithAnnotations(editor, ctx);
+      }
+    });
+    this.addCommand({
+      id: "paste-with-annotations",
+      name: "Paste with annotations",
+      icon: "clipboard-paste",
+      editorCallback: (editor, ctx) => {
+        this.pasteWithAnnotations(editor, ctx);
       }
     });
     this.syncCategoryCommands();
@@ -4357,6 +4452,102 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
     }
     this.notifyChange();
     if (type === "comment") void this.activateSidebar();
+  }
+  // ── Copy / paste with annotations ────────────────────────────────────────
+  // Stashes the selected text together with every annotation covering it, and
+  // puts the plain text on the system clipboard so an ordinary Ctrl+V still
+  // does the obvious thing.
+  copyWithAnnotations(editor, ctx) {
+    var _a, _b;
+    const path = (_a = ctx.file) == null ? void 0 : _a.path;
+    if (path === void 0) return;
+    const from = editor.posToOffset(editor.getCursor("from"));
+    const to = editor.posToOffset(editor.getCursor("to"));
+    if (from === to) {
+      new import_obsidian6.Notice("Select some text to copy");
+      return;
+    }
+    const { body } = parseDocument(editor.getValue());
+    if (to > body.length) {
+      new import_obsidian6.Notice("The annotation block itself cannot be copied with annotations");
+      return;
+    }
+    const transfer = buildTransfer(body, this.placedAnnotations(path), from, to);
+    this.transfer = transfer;
+    void ((_b = navigator.clipboard) == null ? void 0 : _b.writeText(transfer.text).catch(() => void 0));
+    const n = transfer.annotations.length;
+    new import_obsidian6.Notice(
+      n === 0 ? "Copied \u2014 no annotations in the selection" : `Copied with ${n} annotation${n === 1 ? "" : "s"}`
+    );
+  }
+  // Inserts the stashed text at the cursor and writes its annotations into the
+  // destination note, re-anchored against the text as it now reads there.
+  pasteWithAnnotations(editor, ctx) {
+    var _a;
+    const path = (_a = ctx.file) == null ? void 0 : _a.path;
+    if (path === void 0) return;
+    const transfer = this.transfer;
+    if (!transfer) {
+      new import_obsidian6.Notice('Nothing copied yet \u2014 run "Copy selection with annotations" first');
+      return;
+    }
+    const from = editor.posToOffset(editor.getCursor("from"));
+    const to = editor.posToOffset(editor.getCursor("to"));
+    const { body } = parseDocument(editor.getValue());
+    if (to > body.length) {
+      new import_obsidian6.Notice("Cannot paste into the annotation block");
+      return;
+    }
+    editor.replaceSelection(transfer.text);
+    const newBody = parseDocument(editor.getValue()).body;
+    const nowMs = Date.now();
+    const annotations = transferToAnnotations(transfer, {
+      body: newBody,
+      insertOffset: from,
+      ids: transfer.annotations.map(() => generateAnnotationId(nowMs, Math.random())),
+      nowIso: formatTimestamp(nowMs)
+    });
+    if (annotations.length > 0) {
+      this.queue.request(
+        path,
+        (text) => annotations.reduce((acc, a) => upsertAnnotation(acc, a), text)
+      );
+      const state = this.states.get(path);
+      if (state) {
+        for (const [i, a] of annotations.entries()) {
+          const carried = transfer.annotations[i];
+          if (!carried) continue;
+          state.annotations.push(a);
+          state.outcomes.set(a.id, {
+            status: "matched",
+            start: from + carried.start,
+            end: from + carried.end,
+            confidence: 1,
+            refreshedSelector: null
+          });
+        }
+        this.decorateAllFor(path);
+      }
+      this.notifyChange();
+    }
+    const n = annotations.length;
+    new import_obsidian6.Notice(
+      n === 0 ? "Pasted \u2014 no annotations travelled with the text" : `Pasted with ${n} annotation${n === 1 ? "" : "s"}`
+    );
+  }
+  // Every annotation in `path` that currently resolves to a range, paired with
+  // that range. Orphans have no place in the text to copy from, so they are
+  // left behind.
+  placedAnnotations(path) {
+    const state = this.states.get(path);
+    if (!state) return [];
+    const placed = [];
+    for (const annotation of state.annotations) {
+      const outcome = state.outcomes.get(annotation.id);
+      if ((outcome == null ? void 0 : outcome.status) !== "matched") continue;
+      placed.push({ annotation, start: outcome.start, end: outcome.end });
+    }
+    return placed;
   }
   setComment(path, id, comment) {
     this.patchAnnotation(path, id, { comment, dateModified: formatTimestamp(Date.now()) });

@@ -1,5 +1,6 @@
-// Recolours one Note Toolbar item while a gutter is switched on, so a toolbar
-// button reads as "pressed" for as long as its gutter is showing.
+// Recolours one Note Toolbar item with the state of the toggle it runs, so a
+// toolbar button reads as "pressed" for as long as that toggle is on — and, if
+// an Off colour is configured, as explicitly "not pressed" while it is off.
 //
 // Note Toolbar (https://github.com/chrisgurney/obsidian-note-toolbar) exposes no
 // public API for third-party styling, so this reads its plugin instance and
@@ -11,8 +12,8 @@
 
 import type { App } from 'obsidian';
 
-import type { ThemedPartStyles } from '../core/settings';
-import { themedColors } from '../core/settings';
+import type { ToolbarHighlight } from '../core/settings';
+import { toolbarHighlightColor } from '../core/settings';
 
 // Item types that render as structure rather than a button, so there is nothing
 // to colour.
@@ -117,9 +118,9 @@ export function itemDisplayName(item: ToolbarItemInfo): string {
 	return item.label || item.tooltip || item.icon || '(untitled item)';
 }
 
-// One configured target and whether its gutter is currently on.
+// One configured target and whether its toggle is currently on.
 export interface HighlightTarget {
-	highlight: { toolbarUuid: string; itemUuid: string; style: ThemedPartStyles };
+	highlight: ToolbarHighlight;
 	active: boolean;
 }
 
@@ -138,15 +139,18 @@ export class ToolbarHighlighter {
 	// idempotent, so it is safe to call on any workspace event.
 	refresh(): void {
 		this.clear();
+		// Both states are painted now, so an inactive target is no longer
+		// filtered out here — an Off colour left switched off simply resolves
+		// to '' below and the item is skipped.
 		const targets = this.getTargets().filter(
-			(t) => t.active && t.highlight.toolbarUuid !== '' && t.highlight.itemUuid !== '',
+			(t) => t.highlight.toolbarUuid !== '' && t.highlight.itemUuid !== '',
 		);
 		if (targets.length === 0) return;
 
 		const containers = this.toolbarContainers();
 		if (containers.length === 0) return;
 
-		for (const { highlight } of targets) {
+		for (const { highlight, active } of targets) {
 			const toolbar = rawToolbars(this.app).find((t) => t.uuid === highlight.toolbarUuid);
 			if (!toolbar) continue;
 			const index = rawItems(toolbar).findIndex((i) => i.uuid === highlight.itemUuid);
@@ -160,11 +164,10 @@ export class ToolbarHighlighter {
 				// Read the theme off the element's own document so an item in a
 				// popout window follows that window's theme.
 				const dark = target.ownerDocument.body.classList.contains('theme-dark');
-				const { fg, bg } = themedColors(highlight.style, dark);
-				if (fg === '' && bg === '') continue;
+				const bg = toolbarHighlightColor(highlight, active, dark);
+				if (bg === '') continue;
 				target.addClass(HIGHLIGHT_CLASS);
-				if (bg !== '') target.style.setProperty('background-color', bg);
-				if (fg !== '') target.style.setProperty('color', fg);
+				target.style.setProperty('background-color', bg);
 			}
 		}
 	}

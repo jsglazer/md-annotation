@@ -285,8 +285,10 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 		containerEl.createEl('p', {
 			text:
 				'Pick the toolbar button that runs each toggle command below and it will take the ' +
-				'colours below while that toggle is on, so the toolbar reads as pressed. A toggle ' +
-				'that is off leaves its button to Note Toolbar.',
+				'On colour while that toggle is on, so the toolbar reads as pressed, and the Off ' +
+				'colour while it is off. Either colour left unticked leaves the button to Note ' +
+				'Toolbar for that state — Off is unticked by default, so only "on" stands out. ' +
+				'Backgrounds only: the icon and label colour stay Note Toolbar\'s.',
 			cls: 'setting-item-description',
 		});
 
@@ -345,8 +347,10 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 			});
 	}
 
-	// The two colour rows, laid out like the category grid so Fr/Bg per theme
-	// read the same way here as everywhere else in these settings.
+	// The three colour rows, laid out like the category grid so light/dark per
+	// button reads the same way here as everywhere else in these settings. The
+	// per-theme pair is On/Off rather than Fr/Bg: a toolbar button only ever
+	// takes a background from this plugin.
 	private renderToolbarHighlightGrid(containerEl: HTMLElement): void {
 		const wrap = containerEl.createDiv('mdann-grid-wrap');
 		const table = wrap.createEl('table', { cls: 'mdann-grid-table' });
@@ -360,7 +364,10 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 
 		const r2 = thead.createEl('tr');
 		for (let i = 0; i < 4; i++) {
-			r2.createEl('th', { text: i % 2 === 0 ? 'Fr' : 'Bg', cls: i % 2 === 0 ? 'mdann-grid-sep' : '' });
+			r2.createEl('th', {
+				text: i % 2 === 0 ? 'On' : 'Off',
+				cls: i % 2 === 0 ? 'mdann-grid-sep' : '',
+			});
 		}
 
 		const tbody = table.createEl('tbody');
@@ -378,17 +385,21 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 		tr.createEl('td', { text: label, cls: 'mdann-grid-name' });
 
 		let exampleTd: HTMLElement | null = null;
+		// Both states are previewed side by side — an Off colour is only
+		// meaningful next to the On colour it alternates with.
 		const refreshExample = (): void => {
 			if (!exampleTd) return;
 			exampleTd.empty();
-			const part: PartStyle = highlight.style[this.isDarkTheme() ? 'dark' : 'light'];
-			this.appendExampleSpan(exampleTd, label, enabledColor(part.fr), enabledColor(part.bg), '');
+			const theme = this.isDarkTheme() ? 'dark' : 'light';
+			this.appendExampleSpan(exampleTd, 'On', '', enabledColor(highlight.on[theme]), '');
+			exampleTd.appendText(' ');
+			this.appendExampleSpan(exampleTd, 'Off', '', enabledColor(highlight.off[theme]), '');
 		};
 
 		for (const theme of ['light', 'dark'] as const) {
-			for (const field of ['fr', 'bg'] as const) {
-				const td = tr.createEl('td', { cls: field === 'fr' ? 'mdann-grid-sep' : '' });
-				this.renderColorCell(td, highlight.style[theme][field], refreshExample);
+			for (const state of ['on', 'off'] as const) {
+				const td = tr.createEl('td', { cls: state === 'on' ? 'mdann-grid-sep' : '' });
+				this.renderColorCell(td, highlight[state][theme], refreshExample);
 			}
 		}
 

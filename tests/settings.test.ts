@@ -22,6 +22,7 @@ import {
 	partStyle,
 	resolveStyle,
 	themedColors,
+	toolbarHighlightColor,
 	usableCategoryNames,
 } from '../src/core/settings';
 
@@ -351,44 +352,68 @@ describe('format export / import', () => {
 });
 
 describe('gutter toolbar highlight', () => {
-	it('defaults to no target and a usable colour pair', () => {
+	it('defaults to no target, an On colour, and no Off colour', () => {
 		const s = defaultSettings();
 		expect(s.gutterAnnotationsToolbar.toolbarUuid).toBe('');
 		expect(s.gutterAnnotationsToolbar.itemUuid).toBe('');
 		expect(s.gutterCommentsToolbar.toolbarUuid).toBe('');
-		expect(themedColors(s.gutterAnnotationsToolbar.style, false).bg).toBe('#fff3a3');
-		expect(themedColors(s.gutterCommentsToolbar.style, true).bg).toBe('#2e5d33');
+		expect(toolbarHighlightColor(s.gutterAnnotationsToolbar, true, false)).toBe('#fff3a3');
+		expect(toolbarHighlightColor(s.gutterCommentsToolbar, true, true)).toBe('#2e5d33');
+		// Off is unticked out of the box, so an item is left to Note Toolbar
+		// while its toggle is off — same behaviour as before v1.0.22.
+		expect(toolbarHighlightColor(s.gutterAnnotationsToolbar, false, false)).toBe('');
+		expect(toolbarHighlightColor(s.gutterAnnotationsToolbar, false, true)).toBe('');
 	});
 
-	it('reads a stored target and style back', () => {
+	it('reads a stored target and both colour states back', () => {
 		const s = normalizeSettings({
 			gutterAnnotationsToolbar: {
 				toolbarUuid: 'tb-1',
 				itemUuid: 'item-7',
-				style: {
-					light: { fr: { enabled: true, color: '#112233' }, bg: { enabled: false, color: '' } },
-					dark: { fr: { enabled: true, color: '#445566' }, bg: { enabled: false, color: '' } },
+				on: {
+					light: { enabled: true, color: '#112233' },
+					dark: { enabled: true, color: '#445566' },
+				},
+				off: {
+					light: { enabled: true, color: '#778899' },
+					dark: { enabled: false, color: '#aabbcc' },
 				},
 			},
 		});
 		expect(s.gutterAnnotationsToolbar.toolbarUuid).toBe('tb-1');
 		expect(s.gutterAnnotationsToolbar.itemUuid).toBe('item-7');
-		expect(themedColors(s.gutterAnnotationsToolbar.style, false)).toEqual({
-			fg: '#112233',
-			bg: '',
+		expect(toolbarHighlightColor(s.gutterAnnotationsToolbar, true, false)).toBe('#112233');
+		expect(toolbarHighlightColor(s.gutterAnnotationsToolbar, true, true)).toBe('#445566');
+		expect(toolbarHighlightColor(s.gutterAnnotationsToolbar, false, false)).toBe('#778899');
+		expect(toolbarHighlightColor(s.gutterAnnotationsToolbar, false, true)).toBe('');
+	});
+
+	it('migrates a pre-1.0.22 Fr/Bg style into the On colour, keeping only Bg', () => {
+		const s = normalizeSettings({
+			gutterAnnotationsToolbar: {
+				toolbarUuid: 'tb-1',
+				itemUuid: 'item-7',
+				style: {
+					light: { fr: { enabled: true, color: '#112233' }, bg: { enabled: true, color: '#eeeeee' } },
+					dark: { fr: { enabled: true, color: '#445566' }, bg: { enabled: false, color: '' } },
+				},
+			},
 		});
-		expect(themedColors(s.gutterAnnotationsToolbar.style, true).fg).toBe('#445566');
+		expect(toolbarHighlightColor(s.gutterAnnotationsToolbar, true, false)).toBe('#eeeeee');
+		expect(toolbarHighlightColor(s.gutterAnnotationsToolbar, true, true)).toBe('');
+		expect(s.gutterAnnotationsToolbar.off).toEqual(defaultSettings().gutterAnnotationsToolbar.off);
 	});
 
 	it('falls back to defaults for malformed values without half-writing a target', () => {
 		const s = normalizeSettings({
 			gutterAnnotationsToolbar: 'nope',
-			gutterCommentsToolbar: { toolbarUuid: 42, itemUuid: null, style: 'nope' },
+			gutterCommentsToolbar: { toolbarUuid: 42, itemUuid: null, on: 'nope', off: 'nope' },
 		});
 		expect(s.gutterAnnotationsToolbar).toEqual(defaultSettings().gutterAnnotationsToolbar);
 		expect(s.gutterCommentsToolbar.toolbarUuid).toBe('');
 		expect(s.gutterCommentsToolbar.itemUuid).toBe('');
-		expect(s.gutterCommentsToolbar.style).toEqual(defaultSettings().gutterCommentsToolbar.style);
+		expect(s.gutterCommentsToolbar.on).toEqual(defaultSettings().gutterCommentsToolbar.on);
+		expect(s.gutterCommentsToolbar.off).toEqual(defaultSettings().gutterCommentsToolbar.off);
 	});
 });
 

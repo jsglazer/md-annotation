@@ -47,18 +47,27 @@ export const GUTTER_MIN_WIDTH = 140;
 export const GUTTER_MAX_WIDTH = 480;
 export const GUTTER_DEFAULT_WIDTH = 220;
 
-// One Note Toolbar item to recolour while a gutter is switched on. The two
-// uuids identify the item (toolbar → item); the style is the colour pair
-// applied while that gutter is showing — an item whose gutter is off is left
-// entirely to Note Toolbar's own styling, so "on" reads as the exception.
+// One Note Toolbar item to recolour with the state of the toggle it runs. The
+// two uuids identify the item (toolbar → item); `on` and `off` are the
+// background colours applied while that toggle is on and off respectively.
+// Background only — a toolbar button's icon and label colour belong to Note
+// Toolbar's own theming, and overriding them made buttons read as broken.
+// A colour that is switched off leaves the button entirely to Note Toolbar,
+// which is what `off` defaults to: only "on" stands out until you say otherwise.
 export interface ToolbarHighlight {
 	toolbarUuid: string;
 	itemUuid: string;
-	style: ThemedPartStyles;
+	on: ThemedColorOption;
+	off: ThemedColorOption;
 }
 
-export function makeToolbarHighlight(light: PartStyle, dark: PartStyle): ToolbarHighlight {
-	return { toolbarUuid: '', itemUuid: '', style: { light, dark } };
+export function makeToolbarHighlight(onLight: string, onDark: string): ToolbarHighlight {
+	return {
+		toolbarUuid: '',
+		itemUuid: '',
+		on: { light: colorOption(onLight), dark: colorOption(onDark) },
+		off: { light: colorOption(), dark: colorOption() },
+	};
 }
 
 export interface MdAnnotationSettings {
@@ -170,18 +179,9 @@ export function defaultSettings(): MdAnnotationSettings {
 		gutterOnlyWhenAnnotated: true,
 		gutterAnnotationsFontSize: '',
 		gutterCommentsFontSize: '',
-		gutterAnnotationsToolbar: makeToolbarHighlight(
-			partStyle('', '#fff3a3'),
-			partStyle('', '#7a6f1f'),
-		),
-		gutterCommentsToolbar: makeToolbarHighlight(
-			partStyle('', '#c8e6c9'),
-			partStyle('', '#2e5d33'),
-		),
-		textClickJumpToolbar: makeToolbarHighlight(
-			partStyle('', '#fff3a3'),
-			partStyle('', '#7a6f1f'),
-		),
+		gutterAnnotationsToolbar: makeToolbarHighlight('#fff3a3', '#7a6f1f'),
+		gutterCommentsToolbar: makeToolbarHighlight('#c8e6c9', '#2e5d33'),
+		textClickJumpToolbar: makeToolbarHighlight('#fff3a3', '#7a6f1f'),
 		autoRepairOrphans: false,
 		syncTextAndSidebar: true,
 		sidebarClickJumpsToText: true,
@@ -243,16 +243,34 @@ function readThemedPartStyles(v: unknown): ThemedPartStyles {
 	return { light: readPartStyle(r.light), dark: readPartStyle(r.dark) };
 }
 
+function readThemedColorOption(v: unknown, fallback: ThemedColorOption): ThemedColorOption {
+	const r = asRecord(v);
+	if (!r) return fallback;
+	return { light: readColorOption(r.light), dark: readColorOption(r.dark) };
+}
+
 // One stored Note Toolbar highlight. An unreadable value keeps the default
 // colours but never a half-written target, so a corrupt uuid pair simply
 // leaves the highlight switched off rather than pointing somewhere arbitrary.
+//
+// Before v1.0.22 the "on" colours lived in a `style: ThemedPartStyles` Fr/Bg
+// pair with no "off" state at all; that shape is still read, keeping only its
+// Bg half (the Fr option was dropped — see ToolbarHighlight).
 function readToolbarHighlight(v: unknown, fallback: ToolbarHighlight): ToolbarHighlight {
 	const r = asRecord(v);
 	if (!r) return fallback;
+	let on = fallback.on;
+	if (asRecord(r.on)) {
+		on = readThemedColorOption(r.on, fallback.on);
+	} else if (asRecord(r.style)) {
+		const legacy = readThemedPartStyles(r.style);
+		on = { light: legacy.light.bg, dark: legacy.dark.bg };
+	}
 	return {
 		toolbarUuid: readString(r.toolbarUuid),
 		itemUuid: readString(r.itemUuid),
-		style: asRecord(r.style) ? readThemedPartStyles(r.style) : fallback.style,
+		on,
+		off: readThemedColorOption(r.off, fallback.off),
 	};
 }
 
@@ -550,6 +568,18 @@ function enabledColor(opt: ColorOption): string {
 export function themedColors(style: ThemedPartStyles, dark: boolean): { fg: string; bg: string } {
 	const part = dark ? style.dark : style.light;
 	return { fg: enabledColor(part.fr), bg: enabledColor(part.bg) };
+}
+
+// The background a toolbar item takes for the active theme and toggle state,
+// '' when that state's colour is switched off (the item is then left to Note
+// Toolbar's own styling).
+export function toolbarHighlightColor(
+	highlight: ToolbarHighlight,
+	active: boolean,
+	dark: boolean,
+): string {
+	const themed = active ? highlight.on : highlight.off;
+	return enabledColor(dark ? themed.dark : themed.light);
 }
 
 // The end-of-text rule's colour for the active theme, '' when the theme's
