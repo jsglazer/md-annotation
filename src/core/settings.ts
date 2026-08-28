@@ -103,6 +103,11 @@ export interface MdAnnotationSettings {
 	gutterAnnotationsToolbar: ToolbarHighlight;
 	gutterCommentsToolbar: ToolbarHighlight;
 
+	// Note Toolbar item that follows the "Text click jumps to sidebar" toggle.
+	// Same mechanism as the two gutter ones, for a toggle that lives on the
+	// General tab rather than the gutter.
+	textClickJumpToolbar: ToolbarHighlight;
+
 	// Off by default: an orphan is visible and fixable from the sidebar, and a
 	// silent repair at the relaxed bar could move a highlight without you
 	// noticing. On, the same pass the "Fix orphans" button runs is applied to
@@ -172,6 +177,10 @@ export function defaultSettings(): MdAnnotationSettings {
 		gutterCommentsToolbar: makeToolbarHighlight(
 			partStyle('', '#c8e6c9'),
 			partStyle('', '#2e5d33'),
+		),
+		textClickJumpToolbar: makeToolbarHighlight(
+			partStyle('', '#fff3a3'),
+			partStyle('', '#7a6f1f'),
 		),
 		autoRepairOrphans: false,
 		syncTextAndSidebar: true,
@@ -297,6 +306,7 @@ export function normalizeSettings(raw: unknown): MdAnnotationSettings {
 		s.gutterAnnotationsToolbar,
 	);
 	s.gutterCommentsToolbar = readToolbarHighlight(r.gutterCommentsToolbar, s.gutterCommentsToolbar);
+	s.textClickJumpToolbar = readToolbarHighlight(r.textClickJumpToolbar, s.textClickJumpToolbar);
 
 	// 'categoryStyles' since v1.0.20; 'formatStyles' is the same record under
 	// its pre-1.0.20 name.

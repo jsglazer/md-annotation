@@ -36,7 +36,7 @@ import {
 	listToolbars,
 } from './ui/toolbarHighlight';
 
-type TabId = 'general' | 'annotations' | 'comments' | 'gutter';
+type TabId = 'general' | 'annotations' | 'comments' | 'gutter' | 'toolbar';
 
 // A slider reports every step of a drag; persist once the drag settles.
 const SLIDER_SAVE_DEBOUNCE_MS = 250;
@@ -95,6 +95,7 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 			{ id: 'annotations', label: 'Annotations' },
 			{ id: 'comments', label: 'Comments' },
 			{ id: 'gutter', label: 'Gutter' },
+			{ id: 'toolbar', label: 'Note Toolbar' },
 		];
 		for (const tab of tabs) {
 			const btn = tabBar.createEl('button', {
@@ -114,6 +115,8 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 			this.renderCommentsTab(containerEl);
 		} else if (this.activeTab === 'gutter') {
 			this.renderGutterTab(containerEl);
+		} else if (this.activeTab === 'toolbar') {
+			this.renderToolbarTab(containerEl);
 		} else {
 			this.renderGeneralTab(containerEl);
 		}
@@ -163,8 +166,8 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 	// ── Gutter tab ───────────────────────────────────────────────────────────
 
 	// Everything about the margin gutter in one place: what it shows, which
-	// margin each type uses, how wide it is, and the optional Note Toolbar
-	// items that light up while it is on.
+	// margin each type uses, and how wide it is. The optional Note Toolbar
+	// items that light up with it live on their own tab.
 	private renderGutterTab(containerEl: HTMLElement): void {
 		containerEl.createEl('p', {
 			text:
@@ -259,12 +262,13 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 			},
 		);
 
-		this.renderToolbarHighlightSection(containerEl);
 	}
 
-	// Note Toolbar has no API for third-party styling, so the section simply
-	// disappears when it is not installed — there is nothing to point at.
-	private renderToolbarHighlightSection(containerEl: HTMLElement): void {
+	// ── Note Toolbar tab ─────────────────────────────────────────────────────
+
+	// Note Toolbar has no API for third-party styling, so the tab simply says
+	// so when the plugin is not installed — there is nothing to point at.
+	private renderToolbarTab(containerEl: HTMLElement): void {
 		// eslint-disable-next-line obsidianmd/ui/sentence-case -- 'Note Toolbar' is the plugin's own name
 		new Setting(containerEl).setName('Note Toolbar buttons').setHeading();
 
@@ -272,7 +276,7 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 			containerEl.createEl('p', {
 				text:
 					'Install and enable the Note Toolbar plugin to have one of its buttons change ' +
-					'colour while a gutter is showing.',
+					'colour while the toggle it runs is on.',
 				cls: 'setting-item-description',
 			});
 			return;
@@ -280,9 +284,9 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 
 		containerEl.createEl('p', {
 			text:
-				'Pick the toolbar button that runs each "Show/hide … in the gutter" command and ' +
-				'it will take the colours below while that gutter is on, so the toolbar reads ' +
-				'as pressed. A gutter that is off leaves its button to Note Toolbar.',
+				'Pick the toolbar button that runs each toggle command below and it will take the ' +
+				'colours below while that toggle is on, so the toolbar reads as pressed. A toggle ' +
+				'that is off leaves its button to Note Toolbar.',
 			cls: 'setting-item-description',
 		});
 
@@ -295,6 +299,11 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 			containerEl,
 			'Comments button',
 			this.plugin.settings.gutterCommentsToolbar,
+		);
+		this.renderToolbarItemPicker(
+			containerEl,
+			'Text click jumps to sidebar button',
+			this.plugin.settings.textClickJumpToolbar,
 		);
 
 		this.renderToolbarHighlightGrid(containerEl);
@@ -357,6 +366,7 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 		const tbody = table.createEl('tbody');
 		this.renderToolbarHighlightRow(tbody, 'Annotations', this.plugin.settings.gutterAnnotationsToolbar);
 		this.renderToolbarHighlightRow(tbody, 'Comments', this.plugin.settings.gutterCommentsToolbar);
+		this.renderToolbarHighlightRow(tbody, 'Text click', this.plugin.settings.textClickJumpToolbar);
 	}
 
 	private renderToolbarHighlightRow(

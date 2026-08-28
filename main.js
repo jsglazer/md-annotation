@@ -692,6 +692,10 @@ function defaultSettings() {
       partStyle("", "#c8e6c9"),
       partStyle("", "#2e5d33")
     ),
+    textClickJumpToolbar: makeToolbarHighlight(
+      partStyle("", "#fff3a3"),
+      partStyle("", "#7a6f1f")
+    ),
     autoRepairOrphans: false,
     syncTextAndSidebar: true,
     sidebarClickJumpsToText: true,
@@ -791,6 +795,7 @@ function normalizeSettings(raw) {
     s.gutterAnnotationsToolbar
   );
   s.gutterCommentsToolbar = readToolbarHighlight(r.gutterCommentsToolbar, s.gutterCommentsToolbar);
+  s.textClickJumpToolbar = readToolbarHighlight(r.textClickJumpToolbar, s.textClickJumpToolbar);
   const styles = (_a = asRecord(r.categoryStyles)) != null ? _a : asRecord(r.formatStyles);
   if (styles) {
     const next = {};
@@ -1777,7 +1782,7 @@ function addBlockAndEndLine(view, items, settings) {
   const block = findBlockRange(doc.toString());
   const bodyEnd = block ? block.start : doc.length;
   if (settings.bodyEndLineEnabled) {
-    const line = lastNonBlankLineBefore(view, bodyEnd);
+    const line = lastBodyLineBefore(view, bodyEnd);
     if (line !== null) {
       const color = bodyEndLineColor(
         settings,
@@ -1795,15 +1800,14 @@ function addBlockAndEndLine(view, items, settings) {
     items.push(import_view.Decoration.replace({ block: true }).range(block.start, block.end));
   }
 }
-function lastNonBlankLineBefore(view, bodyEnd) {
+function lastBodyLineBefore(view, bodyEnd) {
   const doc = view.state.doc;
   let lineNumber = doc.lineAt(Math.max(0, Math.min(bodyEnd, doc.length))).number;
   if (bodyEnd < doc.length && doc.line(lineNumber).from === bodyEnd) lineNumber--;
-  for (; lineNumber >= 1; lineNumber--) {
-    const line = doc.line(lineNumber);
-    if (line.text.trim() !== "") return line.from;
-  }
-  return null;
+  if (lineNumber < 1) return null;
+  const line = doc.line(lineNumber);
+  if (lineNumber === 1 && line.text.trim() === "") return null;
+  return line.from;
 }
 
 // src/editor/readingGutter.ts
@@ -2498,7 +2502,8 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
       { id: "general", label: "General" },
       { id: "annotations", label: "Annotations" },
       { id: "comments", label: "Comments" },
-      { id: "gutter", label: "Gutter" }
+      { id: "gutter", label: "Gutter" },
+      { id: "toolbar", label: "Note Toolbar" }
     ];
     for (const tab of tabs) {
       const btn = tabBar.createEl("button", {
@@ -2517,6 +2522,8 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
       this.renderCommentsTab(containerEl);
     } else if (this.activeTab === "gutter") {
       this.renderGutterTab(containerEl);
+    } else if (this.activeTab === "toolbar") {
+      this.renderToolbarTab(containerEl);
     } else {
       this.renderGeneralTab(containerEl);
     }
@@ -2555,8 +2562,8 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
   }
   // ── Gutter tab ───────────────────────────────────────────────────────────
   // Everything about the margin gutter in one place: what it shows, which
-  // margin each type uses, how wide it is, and the optional Note Toolbar
-  // items that light up while it is on.
+  // margin each type uses, and how wide it is. The optional Note Toolbar
+  // items that light up with it live on their own tab.
   renderGutterTab(containerEl) {
     containerEl.createEl("p", {
       text: "Notes can be shown as cards in the margin, level with the line they are anchored to, and edited in place \u2014 in Live Preview, Source mode and Reading view. A gutter is dropped automatically while a pane is too narrow to give up the space.",
@@ -2633,21 +2640,21 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
         this.plugin.settings.gutterCommentsFontSize = v;
       }
     );
-    this.renderToolbarHighlightSection(containerEl);
   }
-  // Note Toolbar has no API for third-party styling, so the section simply
-  // disappears when it is not installed — there is nothing to point at.
-  renderToolbarHighlightSection(containerEl) {
+  // ── Note Toolbar tab ─────────────────────────────────────────────────────
+  // Note Toolbar has no API for third-party styling, so the tab simply says
+  // so when the plugin is not installed — there is nothing to point at.
+  renderToolbarTab(containerEl) {
     new import_obsidian3.Setting(containerEl).setName("Note Toolbar buttons").setHeading();
     if (!isNoteToolbarAvailable(this.app)) {
       containerEl.createEl("p", {
-        text: "Install and enable the Note Toolbar plugin to have one of its buttons change colour while a gutter is showing.",
+        text: "Install and enable the Note Toolbar plugin to have one of its buttons change colour while the toggle it runs is on.",
         cls: "setting-item-description"
       });
       return;
     }
     containerEl.createEl("p", {
-      text: 'Pick the toolbar button that runs each "Show/hide \u2026 in the gutter" command and it will take the colours below while that gutter is on, so the toolbar reads as pressed. A gutter that is off leaves its button to Note Toolbar.',
+      text: "Pick the toolbar button that runs each toggle command below and it will take the colours below while that toggle is on, so the toolbar reads as pressed. A toggle that is off leaves its button to Note Toolbar.",
       cls: "setting-item-description"
     });
     this.renderToolbarItemPicker(
@@ -2659,6 +2666,11 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
       containerEl,
       "Comments button",
       this.plugin.settings.gutterCommentsToolbar
+    );
+    this.renderToolbarItemPicker(
+      containerEl,
+      "Text click jumps to sidebar button",
+      this.plugin.settings.textClickJumpToolbar
     );
     this.renderToolbarHighlightGrid(containerEl);
   }
@@ -2705,6 +2717,7 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
     const tbody = table.createEl("tbody");
     this.renderToolbarHighlightRow(tbody, "Annotations", this.plugin.settings.gutterAnnotationsToolbar);
     this.renderToolbarHighlightRow(tbody, "Comments", this.plugin.settings.gutterCommentsToolbar);
+    this.renderToolbarHighlightRow(tbody, "Text click", this.plugin.settings.textClickJumpToolbar);
   }
   renderToolbarHighlightRow(tbody, label, highlight) {
     const tr = tbody.createEl("tr");
@@ -3953,6 +3966,10 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
       {
         highlight: this.settings.gutterCommentsToolbar,
         active: this.settings.gutterCommentsEnabled
+      },
+      {
+        highlight: this.settings.textClickJumpToolbar,
+        active: this.settings.textClickJumpsToSidebar
       }
     ]);
     const onWorkspaceChange = () => {

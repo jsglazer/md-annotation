@@ -330,7 +330,7 @@ class CommentMarkerWidget extends WidgetType {
 //   - commentsFormattingEnabled off → range comments undecorated, markers plain
 //   - commentsHiddenEnabled on → no markers at all
 //   - hideAnnotationBlock on → the %%md-annotation block is replaced away
-//   - bodyEndLineEnabled on → a rule under the last line of body text
+//   - bodyEndLineEnabled on → a rule under the last line of the body
 //
 // Which annotations qualify, and over what range, lives in
 // core/decorations.ts — including the table and clamping rules.
@@ -398,7 +398,7 @@ export function applyEditorDecorations(
 }
 
 // The two document-level decorations: the collapsed %%md-annotation block and
-// the rule under the last line of body text. Both are derived from the block's
+// the rule under the last line of the body. Both are derived from the block's
 // position, so they are worked out together.
 function addBlockAndEndLine(
 	view: EditorView,
@@ -412,7 +412,7 @@ function addBlockAndEndLine(
 	const bodyEnd = block ? block.start : doc.length;
 
 	if (settings.bodyEndLineEnabled) {
-		const line = lastNonBlankLineBefore(view, bodyEnd);
+		const line = lastBodyLineBefore(view, bodyEnd);
 		if (line !== null) {
 			const color = bodyEndLineColor(
 				settings,
@@ -435,18 +435,21 @@ function addBlockAndEndLine(
 	}
 }
 
-// Start offset of the last line at or before `bodyEnd` that has any
-// non-whitespace on it — where the end-of-text rule is drawn. Null for a note
-// with no body text at all (nothing has ended, so nothing is marked).
-function lastNonBlankLineBefore(view: EditorView, bodyEnd: number): number | null {
+// Start offset of the very last body line at or before `bodyEnd` — where the
+// end-of-text rule is drawn. Trailing blank lines COUNT: the rule marks where
+// the note itself ends, so it sits under the last line before the
+// %%md-annotation block (or the last line of the document when there is no
+// block), blank or not. Null only for a note whose body is entirely empty —
+// nothing has ended, so nothing is marked.
+function lastBodyLineBefore(view: EditorView, bodyEnd: number): number | null {
 	const doc = view.state.doc;
 	let lineNumber = doc.lineAt(Math.max(0, Math.min(bodyEnd, doc.length))).number;
 	// A block starts on its own line, so the line containing `bodyEnd` is the
 	// block's first line rather than body text; step off it.
 	if (bodyEnd < doc.length && doc.line(lineNumber).from === bodyEnd) lineNumber--;
-	for (; lineNumber >= 1; lineNumber--) {
-		const line = doc.line(lineNumber);
-		if (line.text.trim() !== '') return line.from;
-	}
-	return null;
+	if (lineNumber < 1) return null;
+	const line = doc.line(lineNumber);
+	// A one-line body that is blank is no body at all.
+	if (lineNumber === 1 && line.text.trim() === '') return null;
+	return line.from;
 }

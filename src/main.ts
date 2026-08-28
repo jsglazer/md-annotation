@@ -74,7 +74,8 @@ export default class MdAnnotationPlugin extends Plugin {
 	// the preview DOM that Obsidian rebuilds on every re-render).
 	private readingGutters = new Map<HTMLElement, ReadingGutter>();
 	private readingGutterTimer: number | null = null;
-	// Recolours the Note Toolbar items bound to the two gutter toggles.
+	// Recolours the Note Toolbar items bound to the two gutter toggles and the
+	// "Text click jumps to sidebar" toggle.
 	private toolbarHighlighter!: ToolbarHighlighter;
 	private editorTimers = new Map<EditorView, number>();
 	private diskTimers = new Map<string, number>();
@@ -314,6 +315,10 @@ export default class MdAnnotationPlugin extends Plugin {
 			{
 				highlight: this.settings.gutterCommentsToolbar,
 				active: this.settings.gutterCommentsEnabled,
+			},
+			{
+				highlight: this.settings.textClickJumpToolbar,
+				active: this.settings.textClickJumpsToSidebar,
 			},
 		]);
 		const onWorkspaceChange = (): void => {
