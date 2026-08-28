@@ -46,11 +46,12 @@ The two are distinguished by whether text is selected when you run the single **
 - **Two-way navigation** — click annotated text or a comment marker to jump to its sidebar entry (and focus its comment box); on open the sidebar scrolls to the entry nearest the cursor. Clicking into an entry's note box flashes that annotation in the text so you can see what you're writing about.
 - **Text ⇄ sidebar sync** — the sidebar tracks the entry nearest the cursor as you move through the note. On by default; switchable from settings or the **Sync text and sidebar** command (the two are one state).
 - **Share categories between vaults** — export every category to the clipboard as JSON and import it in another vault, merging into what's already there or replacing the set outright. Obsidian Sync replicates a vault to your *other devices*, never to your *other vaults*, so this is the way categories travel.
+- **Copy and paste text with its annotations** — **Copy selection with annotations** takes the selected text *and* every highlight and comment covering it; **Paste with annotations** drops that text into another note and re-anchors them there. Ordinary copy/paste is untouched, so nothing happens by surprise.
 - **Show/hide colors** on demand — commands and settings toggles to hide annotation colors, comment colors, or comment markers entirely
 - **Hide the annotation block** — collapse the `%%md-annotation` JSON out of Live Preview and Source mode so the foot of the note reads as clean as it prints, with an optional **rule under the last line of text** (colour configurable per theme) marking where the note ends
 - **Category renames propagate** — rename a category in settings and every note referencing the old name is rewritten automatically
 - **A command per category** — each category automatically gets its own **Apply - _name_** command (usable from the Command Palette, a hotkey, or a toolbar); adding, renaming, or deleting a category creates or removes its command instantly
-- **Note Toolbar integration** — a paste-in script builds a live "apply category" menu from those commands, so you can highlight the selection (or drop a comment at the cursor) from a [Note Toolbar](https://github.com/chrisgurney/obsidian-note-toolbar) button (see below). A toolbar button bound to a gutter toggle — or to *Text click jumps to sidebar* — can also **change color while that toggle is on**, so the toolbar shows its state at a glance.
+- **Note Toolbar integration** — a paste-in script builds a live "apply category" menu from those commands, so you can highlight the selection (or drop a comment at the cursor) from a [Note Toolbar](https://github.com/chrisgurney/obsidian-note-toolbar) button (see below). A toolbar button bound to a gutter toggle — or to *Text click jumps to sidebar* — can also **carry its own background color for the on and off state**, so the toolbar shows its state at a glance.
 - **Queryable from Dataview / Datacore** — a public JS API for `dataviewjs` / `datacorejs` / `datacorejsx` blocks (see below)
 - **Orphan repair** — orphaned annotations get their own sidebar section. **Fix orphans** searches the note again at a lower confidence bar and re-anchors everything it can place unambiguously; anything still in doubt waits for you to select the new text and re-anchor it with one click. Optionally automatic.
 - **Highlights LaTeX** — annotations spanning inline maths (`$x > 0$`) are highlighted in Live Preview and Reading View as well as Source mode, formula included
@@ -62,6 +63,8 @@ The two are distinguished by whether text is selected when you run the single **
 | Command | Action |
 | --- | --- |
 | **Annotate** | Selection → highlight it (pick a category if more than one is enabled); no selection → insert a comment marker at the cursor |
+| **Copy selection with annotations** | Copy the selected text together with every annotation and comment covering it. The plain text also goes to the system clipboard, so an ordinary paste still works as usual |
+| **Paste with annotations** | Insert the text from the last *Copy selection with annotations* at the cursor and re-anchor its annotations in this note |
 | **Apply - _name_** (one per category) | Apply that specific category directly: selection → highlight it; no selection → drop a comment marker in that category's color. Registered and removed automatically as categories change. |
 | **Show/hide annotation colors** | Toggle highlight colors on annotated text |
 | **Show/hide comment colors** | Toggle colors on comment markers |
@@ -83,7 +86,7 @@ Settings are organized into **General / Annotations / Comments / Gutter / Note T
 - **Annotations** — a colour visibility toggle, plus a per-category grid: Use checkbox, editable name, Fr/Bg colors for light and dark themes (each color has its own enable checkbox), font size, and a live sample-text example. Renaming a category here also updates every annotated note.
 - **Comments** — hide-markers and colour toggles, plus the dedicated comment category's Fr/Bg colors per theme with a live example
 - **Gutter** — everything about the margin cards: show-toggles and left/right margin choice for annotations and for comments independently, the shared width, and a card font size per type
-- **Note Toolbar** — the optional button highlight: bind a [Note Toolbar](https://github.com/chrisgurney/obsidian-note-toolbar) button to a toggle and give it colors to wear while that toggle is on (see below)
+- **Note Toolbar** — the optional button highlight: bind a [Note Toolbar](https://github.com/chrisgurney/obsidian-note-toolbar) button to a toggle and give it a background color to wear while that toggle is on, and another for while it's off (see below)
 
 ### The margin gutter
 
@@ -103,15 +106,15 @@ It works in Live Preview, Source mode and Reading View. Clicking a card scrolls 
 
 ### Note Toolbar button highlight
 
-If [Note Toolbar](https://github.com/chrisgurney/obsidian-note-toolbar) is installed, the **Note Toolbar** tab can bind each of three toggle commands to one of its buttons: pick the toolbar and the button, set Fr/Bg colors per light and dark theme, and that button takes those colors for as long as the toggle is on. A toggle that's off leaves its button entirely to Note Toolbar, so "on" reads as the exception.
+If [Note Toolbar](https://github.com/chrisgurney/obsidian-note-toolbar) is installed, the **Note Toolbar** tab can bind each of three toggle commands to one of its buttons: pick the toolbar and the button, then set the background color it wears while that toggle is **On** and while it is **Off**, per light and dark theme.
 
-| Button | Lit while |
+| Button | Follows |
 | --- | --- |
-| **Annotations** | *Show/hide annotations in the gutter* is on |
-| **Comments** | *Show/hide comments in the gutter* is on |
-| **Text click** | *Text click jumps to sidebar* is on |
+| **Annotations** | *Show/hide annotations in the gutter* |
+| **Comments** | *Show/hide comments in the gutter* |
+| **Text click** | *Text click jumps to sidebar* |
 
-Each has its own row of Light/Dark Fr/Bg cells in the grid, so the three buttons can read differently. The tab disappears into a one-line notice when Note Toolbar isn't installed — there's nothing to point at.
+Each has its own row of Light/Dark **On/Off** cells in the grid, so the three buttons can read differently. Either color can be left unticked, which hands that state back to Note Toolbar's own styling — **Off** starts unticked, so out of the box only "on" stands out. Backgrounds only: the button's icon and label color stay Note Toolbar's. The tab disappears into a one-line notice when Note Toolbar isn't installed — there's nothing to point at.
 
 ### Note layout
 
@@ -150,6 +153,20 @@ Categories are stored in the vault's own `data.json`. Obsidian Sync replicates o
 2. In the target vault: **Import categories → Paste and import**, then choose **Merge** or **Replace all**.
 
 **Merge** adds only the categories the target vault doesn't already have, leaving any category you've tuned there untouched. **Replace all** swaps the whole set and is confirmed separately — annotations referencing a category that isn't in the payload fall back to the first enabled category until you reassign them.
+
+## Copying annotated text between notes
+
+Copying text the ordinary way copies only the characters — the selectors stay behind in the source note's block, so the highlights don't travel. Two commands close that gap without touching ordinary copy/paste:
+
+1. Select the text and run **Copy selection with annotations**. The selection is stashed together with every highlight and comment covering it, and the plain text goes to the system clipboard as usual.
+2. In the destination note, put the cursor where it belongs and run **Paste with annotations**. The text is inserted and its annotations are re-anchored against their new surroundings.
+
+Details worth knowing:
+
+- Each pasted annotation gets a **fresh id** — two notes never share one — while its **author, category, comment, status and created date** come across unchanged. The modified date is stamped at paste time.
+- An annotation the selection **cuts in half** travels with its quote clipped to the copied portion; it re-anchors on context at the destination. Comments travel when their marker falls inside the selection.
+- **Orphaned** annotations stay behind — there's no text to copy them from.
+- The stash lives in memory for the session: it doesn't survive a restart, and it doesn't reach another Obsidian window. Copy again in the new session and paste as normal.
 
 ## Note Toolbar: an "apply category" menu
 
