@@ -50,7 +50,7 @@ The two are distinguished by whether text is selected when you run the single **
 - **Hide the annotation block** — collapse the `%%md-annotation` JSON out of Live Preview and Source mode so the foot of the note reads as clean as it prints, with an optional **rule under the last line of text** (colour configurable per theme) marking where the note ends
 - **Category renames propagate** — rename a category in settings and every note referencing the old name is rewritten automatically
 - **A command per category** — each category automatically gets its own **Apply - _name_** command (usable from the Command Palette, a hotkey, or a toolbar); adding, renaming, or deleting a category creates or removes its command instantly
-- **Note Toolbar integration** — a paste-in script builds a live "apply category" menu from those commands, so you can highlight the selection (or drop a comment at the cursor) from a [Note Toolbar](https://github.com/chrisgurney/obsidian-note-toolbar) button (see below). A toolbar button bound to a gutter toggle can also **change color while that gutter is on**, so the toolbar shows its state at a glance.
+- **Note Toolbar integration** — a paste-in script builds a live "apply category" menu from those commands, so you can highlight the selection (or drop a comment at the cursor) from a [Note Toolbar](https://github.com/chrisgurney/obsidian-note-toolbar) button (see below). A toolbar button bound to a gutter toggle — or to *Text click jumps to sidebar* — can also **change color while that toggle is on**, so the toolbar shows its state at a glance.
 - **Queryable from Dataview / Datacore** — a public JS API for `dataviewjs` / `datacorejs` / `datacorejsx` blocks (see below)
 - **Orphan repair** — orphaned annotations get their own sidebar section. **Fix orphans** searches the note again at a lower confidence bar and re-anchors everything it can place unambiguously; anything still in doubt waits for you to select the new text and re-anchor it with one click. Optionally automatic.
 - **Highlights LaTeX** — annotations spanning inline maths (`$x > 0$`) are highlighted in Live Preview and Reading View as well as Source mode, formula included
@@ -66,7 +66,7 @@ The two are distinguished by whether text is selected when you run the single **
 | **Show/hide annotation colors** | Toggle highlight colors on annotated text |
 | **Show/hide comment colors** | Toggle colors on comment markers |
 | **Show/hide the annotation block** | Collapse the `%%md-annotation` block at the foot of the note out of Live Preview and Source mode. Flips the same persisted setting shown on the General tab. |
-| **Show/hide the end-of-text line** | Draw a rule under the last line of body text. Flips the same persisted setting shown on the General tab. |
+| **Show/hide the end-of-text line** | Draw a rule at the very end of the note's text. Flips the same persisted setting shown on the General tab. |
 | **Show/hide annotations in the gutter** | Toggle the margin cards for annotations. Flips the same persisted setting shown on the Gutter tab. |
 | **Show/hide comments in the gutter** | Toggle the margin cards for comments. Flips the same persisted setting shown on the Gutter tab. |
 | **Sync text and sidebar** | Toggle continuous syncing of the sidebar to the entry nearest the cursor. Flips the same persisted setting shown on the General tab. |
@@ -77,12 +77,13 @@ The Annotate action is also in the editor context menu — shown as *Annotate se
 
 ## Settings
 
-Settings are organized into **General / Annotations / Comments / Gutter** tabs:
+Settings are organized into **General / Annotations / Comments / Gutter / Note Toolbar** tabs:
 
 - **General** — the author name recorded on every annotation you create; three **navigation** toggles (all on by default); the **note layout** options; the **orphaned annotations** toggle; and **category export / import**
 - **Annotations** — a colour visibility toggle, plus a per-category grid: Use checkbox, editable name, Fr/Bg colors for light and dark themes (each color has its own enable checkbox), font size, and a live sample-text example. Renaming a category here also updates every annotated note.
 - **Comments** — hide-markers and colour toggles, plus the dedicated comment category's Fr/Bg colors per theme with a live example
-- **Gutter** — everything about the margin cards: show-toggles and left/right margin choice for annotations and for comments independently, the shared width, a card font size per type, and the optional Note Toolbar button highlight (see below)
+- **Gutter** — everything about the margin cards: show-toggles and left/right margin choice for annotations and for comments independently, the shared width, and a card font size per type
+- **Note Toolbar** — the optional button highlight: bind a [Note Toolbar](https://github.com/chrisgurney/obsidian-note-toolbar) button to a toggle and give it colors to wear while that toggle is on (see below)
 
 ### The margin gutter
 
@@ -102,7 +103,15 @@ It works in Live Preview, Source mode and Reading View. Clicking a card scrolls 
 
 ### Note Toolbar button highlight
 
-If [Note Toolbar](https://github.com/chrisgurney/obsidian-note-toolbar) is installed, the **Gutter** tab can bind each *Show/hide … in the gutter* command to one of its buttons: pick the toolbar and the button, set Fr/Bg colors per light and dark theme, and that button takes those colors for as long as the gutter is showing. A gutter that's off leaves its button entirely to Note Toolbar, so "on" reads as the exception.
+If [Note Toolbar](https://github.com/chrisgurney/obsidian-note-toolbar) is installed, the **Note Toolbar** tab can bind each of three toggle commands to one of its buttons: pick the toolbar and the button, set Fr/Bg colors per light and dark theme, and that button takes those colors for as long as the toggle is on. A toggle that's off leaves its button entirely to Note Toolbar, so "on" reads as the exception.
+
+| Button | Lit while |
+| --- | --- |
+| **Annotations** | *Show/hide annotations in the gutter* is on |
+| **Comments** | *Show/hide comments in the gutter* is on |
+| **Text click** | *Text click jumps to sidebar* is on |
+
+Each has its own row of Light/Dark Fr/Bg cells in the grid, so the three buttons can read differently. The tab disappears into a one-line notice when Note Toolbar isn't installed — there's nothing to point at.
 
 ### Note layout
 
@@ -111,7 +120,7 @@ Two General-tab options control what the note itself looks like around the annot
 | Setting / command | Effect |
 | --- | --- |
 | **Hide the annotation block** — *Show/hide the annotation block* | Collapses the whole `%%md-annotation` block (markers and JSON) out of Live Preview and Source mode. Reading View never showed it, since Obsidian hides `%%` comments there. The block is only hidden from view — it is still in the file, still written to, and still the source of truth |
-| **Show a line at the end of the text** — *Show/hide the end-of-text line* | Draws a rule under the last line of body text, giving the note a visible bottom edge once the block is hidden. Placed above the block, or at the true end of the note when there is none. Blank lines at the foot are skipped |
+| **Show a line at the end of the text** — *Show/hide the end-of-text line* | Draws a rule at the very end of the note's text, giving it a visible bottom edge once the block is hidden. It sits on the last line before the `%%md-annotation` block, or on the last line of the document when there is none — **trailing blank lines included**, so the rule marks where the note actually ends rather than where its last words are. A note with no body text at all draws no rule |
 
 The rule's colour is set per theme, with the same checkbox / swatch / hex cells as the annotation categories. Uncheck a theme to fall back to whatever divider colour the theme itself uses.
 
