@@ -231,6 +231,18 @@ export function removeAnnotation(doc: string, id: string): string {
 	return composeDocument(body, next, unparseable);
 }
 
+// Removes every annotation whose id is in `ids`, in a single rewrite. Used by
+// the sidebar's "Delete all orphans" button and by the orphan Notice's Delete
+// action, so a batch cleanup is one queued edit rather than one per entry.
+export function removeAnnotations(doc: string, ids: ReadonlyArray<string>): string {
+	if (ids.length === 0) return doc;
+	const drop = new Set(ids);
+	const { body, annotations, unparseable } = parseDocument(doc);
+	const next = annotations.filter((a) => !drop.has(a.id));
+	if (next.length === annotations.length) return doc;
+	return composeDocument(body, next, unparseable);
+}
+
 // Renames a category across every annotation in one document (settings-driven
 // mass rename — dates are left untouched). Returns the document unchanged
 // when no annotation uses `oldName`.

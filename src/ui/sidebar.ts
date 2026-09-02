@@ -335,6 +335,29 @@ export class AnnotationSidebarView extends ItemView {
 					: `MD Annotation: re-anchored ${repaired} orphan${repaired === 1 ? '' : 's'}`,
 			);
 		});
+
+		// The companion to "Fix orphans": clear out the ones you know are gone
+		// for good, in one confirmed action instead of one ✕ per card. Deletes
+		// every orphan in the note, including any the current search hides.
+		const del = row.createEl('button', { text: 'Delete all orphans', cls: 'mod-warning' });
+		del.setAttribute('aria-label', 'Delete every orphaned annotation in this note');
+		del.addEventListener('click', () => {
+			const count = this.plugin.orphanCount(path);
+			if (count === 0) {
+				new Notice('MD Annotation: no orphans to delete');
+				return;
+			}
+			new SidebarConfirmModal(
+				this.app,
+				`Delete ${count} orphaned annotation${count === 1 ? '' : 's'} from this note? This cannot be undone.`,
+				() => {
+					const deleted = this.plugin.deleteOrphansInNote(path);
+					new Notice(
+						`MD Annotation: deleted ${deleted} orphaned annotation${deleted === 1 ? '' : 's'}`,
+					);
+				},
+			).open();
+		});
 	}
 
 	private renderCard(

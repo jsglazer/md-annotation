@@ -14,6 +14,7 @@ import {
 	BLOCK_OPEN,
 	parseDocument,
 	removeAnnotation,
+	removeAnnotations,
 	normalizeBlock,
 	removeUnparseableLine,
 	renameAnnotationCategory,
@@ -48,12 +49,31 @@ const WRITE_DEBOUNCE_MS = 500;
 const DISK_REFRESH_DEBOUNCE_MS = 400;
 const SYNC_DEBOUNCE_MS = 150;
 const TEXT_FLASH_MS = 1200;
+// An annotation orphans transiently all the time — deleting a word before
+// retyping it, a paste that lands in two steps. The prompt waits this long for
+// the text to settle, and cancels if the annotation re-matches meanwhile.
+const ORPHAN_PROMPT_DELAY_MS = 4000;
+// The orphan Notice expires on its own, and expiry means "keep": the only
+// destructive path is the button inside it.
+const ORPHAN_NOTICE_MS = 20000;
 // Reading view renders section by section, so a note produces a burst of
 // post-processor calls; the gutter only needs one pass once they settle.
 const READING_GUTTER_DEBOUNCE_MS = 60;
 // Note Toolbar renders its own DOM per leaf/file/mode. A short delay lets that
 // finish first — handler order across two separate plugins is not guaranteed.
 const TOOLBAR_HIGHLIGHT_DELAY_MS = 50;
+
+// Shortens a quote for a one-line Notice, on a word boundary where there is
+// one close enough to the cut.
+const EXCERPT_LENGTH = 48;
+
+function excerpt(text: string): string {
+	const flat = text.replace(/\s+/g, ' ').trim();
+	if (flat.length <= EXCERPT_LENGTH) return flat;
+	const cut = flat.slice(0, EXCERPT_LENGTH);
+	const space = cut.lastIndexOf(' ');
+	return (space > EXCERPT_LENGTH / 2 ? cut.slice(0, space) : cut) + '…';
+}
 
 // app.commands isn't part of Obsidian's public API surface, so it has no
 // typings — used only to invoke the core "Toggle the right sidebar" command
@@ -81,6 +101,12 @@ export default class MdAnnotationPlugin extends Plugin {
 	private toolbarHighlighter!: ToolbarHighlighter;
 	private editorTimers = new Map<EditorView, number>();
 	private diskTimers = new Map<string, number>();
+	// Orphan prompting state, per file path: which ids were already orphaned
+	// the last time the note resolved (so only a NEW orphan prompts), the ids
+	// waiting out ORPHAN_PROMPT_DELAY_MS, and that path's pending timer.
+	private orphanedIds = new Map<string, Set<string>>();
+	private pendingOrphans = new Map<string, Set<string>>();
+	private orphanPromptTimers = new Map<string, number>();
 	private changeListeners = new Set<() => void>();
 	// A one-shot request the sidebar consumes on its next render: scroll to
 	// (and optionally flash/focus) the entry for `id`.
@@ -311,12 +337,14 @@ export default class MdAnnotationPlugin extends Plugin {
 				const state = this.states.get(oldPath);
 				this.states.delete(oldPath);
 				if (state) this.states.set(file.path, state);
+				this.forgetOrphanTracking(oldPath);
 				this.notifyChange();
 			}),
 		);
 		this.registerEvent(
 			this.app.vault.on('delete', (file) => {
 				this.states.delete(file.path);
+				this.forgetOrphanTracking(file.path);
 				this.notifyChange();
 			}),
 		);
@@ -360,6 +388,10 @@ export default class MdAnnotationPlugin extends Plugin {
 		this.editorTimers.clear();
 		for (const timer of this.diskTimers.values()) window.clearTimeout(timer);
 		this.diskTimers.clear();
+		for (const timer of this.orphanPromptTimers.values()) window.clearTimeout(timer);
+		this.orphanPromptTimers.clear();
+		this.pendingOrphans.clear();
+		this.orphanedIds.clear();
 		if (this.syncTimer !== null) {
 			window.clearTimeout(this.syncTimer);
 			this.syncTimer = null;
@@ -520,6 +552,10 @@ export default class MdAnnotationPlugin extends Plugin {
 		if (this.settings.autoRepairOrphans) {
 			this.repairOrphans(parsed.body, parsed.annotations, outcomes, path);
 		}
+
+		// Prompting reads the outcomes AFTER any repair, so an orphan that the
+		// automatic pass just re-anchored never announces itself.
+		this.trackOrphans(path, parsed.annotations, outcomes);
 
 		const state: FileAnnotationState = {
 			body: parsed.body,
@@ -1011,6 +1047,163 @@ export default class MdAnnotationPlugin extends Plugin {
 			repaired++;
 		}
 		return repaired;
+	}
+
+	// ── Orphan prompting ─────────────────────────────────────────────────────
+
+	// Called on every resolution of `path`. Diffs today's orphans against the
+	// last set to find the ones that JUST broke, and starts (or extends) the
+	// settle timer for them. An annotation that comes back before the timer
+	// fires is dropped from the pending set, so ordinary editing is silent.
+	private trackOrphans(
+		path: string,
+		annotations: ReadonlyArray<Annotation>,
+		outcomes: Map<string, MatchResult>,
+	): void {
+		const nowOrphaned = new Set<string>();
+		for (const annotation of annotations) {
+			const outcome = outcomes.get(annotation.id);
+			if (!outcome || outcome.status === 'orphaned') nowOrphaned.add(annotation.id);
+		}
+		const previously = this.orphanedIds.get(path);
+		this.orphanedIds.set(path, nowOrphaned);
+
+		if (!this.settings.promptOnNewOrphan) return;
+		// First sight of a note: everything already broken on disk is history,
+		// not something that just happened, so it is recorded without prompting.
+		if (previously === undefined) return;
+
+		const pending = this.pendingOrphans.get(path) ?? new Set<string>();
+		// Anything that healed (or was deleted) stops waiting to be announced.
+		for (const id of [...pending]) {
+			if (!nowOrphaned.has(id)) pending.delete(id);
+		}
+		for (const id of nowOrphaned) {
+			if (!previously.has(id)) pending.add(id);
+		}
+		if (pending.size === 0) {
+			this.pendingOrphans.delete(path);
+			this.clearOrphanTimer(path);
+			return;
+		}
+		this.pendingOrphans.set(path, pending);
+		this.clearOrphanTimer(path);
+		this.orphanPromptTimers.set(
+			path,
+			window.setTimeout(() => {
+				this.orphanPromptTimers.delete(path);
+				this.promptForOrphans(path);
+			}, ORPHAN_PROMPT_DELAY_MS),
+		);
+	}
+
+	private clearOrphanTimer(path: string): void {
+		const timer = this.orphanPromptTimers.get(path);
+		if (timer !== undefined) {
+			window.clearTimeout(timer);
+			this.orphanPromptTimers.delete(path);
+		}
+	}
+
+	private forgetOrphanTracking(path: string): void {
+		this.clearOrphanTimer(path);
+		this.pendingOrphans.delete(path);
+		this.orphanedIds.delete(path);
+	}
+
+	// One Notice per settled batch, naming a single orphan by its text or
+	// counting several. Its Delete button removes exactly the ids in the batch;
+	// letting the Notice expire keeps them, still listed in the sidebar.
+	private promptForOrphans(path: string): void {
+		const pending = this.pendingOrphans.get(path);
+		this.pendingOrphans.delete(path);
+		if (!pending || pending.size === 0) return;
+
+		const state = this.states.get(path);
+		if (!state) return;
+		// Re-check against the current outcomes: the note may have changed
+		// again between the last resolution and this timer firing.
+		const ids = [...pending].filter((id) => {
+			const outcome = state.outcomes.get(id);
+			return state.annotations.some((a) => a.id === id) && (!outcome || outcome.status === 'orphaned');
+		});
+		if (ids.length === 0) return;
+
+		const first = state.annotations.find((a) => a.id === ids[0]);
+		const quote = first?.selector.exact ?? '';
+		const label =
+			ids.length > 1
+				? `${ids.length} annotations no longer match any text in this note`
+				: quote === ''
+					? 'A comment marker no longer matches anywhere in this note'
+					: `Annotation "${excerpt(quote)}" no longer matches any text in this note`;
+
+		const frag = activeDocument.createDocumentFragment();
+		frag.createDiv({ text: `MD Annotation: ${label}`, cls: 'mdann-notice-text' });
+		const row = frag.createDiv({ cls: 'mdann-notice-buttons' });
+		const del = row.createEl('button', {
+			text: ids.length > 1 ? `Delete ${ids.length}` : 'Delete',
+			cls: 'mod-warning',
+		});
+		del.addEventListener('click', () => {
+			this.deleteAnnotations(path, ids);
+			new Notice(
+				`MD Annotation: deleted ${ids.length} orphaned annotation${ids.length === 1 ? '' : 's'}`,
+			);
+		});
+		const keep = row.createEl('button', { text: 'Keep' });
+		keep.setAttribute('aria-label', 'Leave it in the sidebar to re-anchor later');
+		new Notice(frag, ORPHAN_NOTICE_MS);
+		// Both buttons let the click bubble to the Notice, which dismisses it;
+		// "Keep" therefore needs no handler beyond existing to be pressed.
+		void keep;
+	}
+
+	// ── Bulk deletion ────────────────────────────────────────────────────────
+
+	// One queued rewrite for the whole batch rather than one per id, so a
+	// cleanup of twenty orphans is a single edit to the note.
+	deleteAnnotations(path: string, ids: ReadonlyArray<string>): number {
+		if (ids.length === 0) return 0;
+		const drop = new Set(ids);
+		this.queue.request(path, (text) => removeAnnotations(text, ids));
+		const state = this.states.get(path);
+		let removed = ids.length;
+		if (state) {
+			const before = state.annotations.length;
+			state.annotations = state.annotations.filter((a) => !drop.has(a.id));
+			removed = before - state.annotations.length;
+			for (const id of drop) state.outcomes.delete(id);
+			this.decorateAllFor(path);
+			this.notifyChange();
+		}
+		const tracked = this.orphanedIds.get(path);
+		if (tracked) for (const id of drop) tracked.delete(id);
+		return removed;
+	}
+
+	// How many orphans the note currently holds, for the sidebar's delete
+	// confirmation (which counts the whole note, not just the filtered list).
+	orphanCount(path: string): number {
+		const state = this.states.get(path);
+		if (!state) return 0;
+		return state.annotations.filter((a) => {
+			const outcome = state.outcomes.get(a.id);
+			return !outcome || outcome.status === 'orphaned';
+		}).length;
+	}
+
+	// Sidebar "Delete all orphans" button.
+	deleteOrphansInNote(path: string): number {
+		const state = this.states.get(path);
+		if (!state) return 0;
+		const ids = state.annotations
+			.filter((a) => {
+				const outcome = state.outcomes.get(a.id);
+				return !outcome || outcome.status === 'orphaned';
+			})
+			.map((a) => a.id);
+		return this.deleteAnnotations(path, ids);
 	}
 
 	// Sidebar "Fix orphans" button: the same pass, on the note already parsed.

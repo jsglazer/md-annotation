@@ -236,6 +236,14 @@ function removeAnnotation(doc, id) {
   if (next.length === annotations.length) return doc;
   return composeDocument(body, next, unparseable);
 }
+function removeAnnotations(doc, ids) {
+  if (ids.length === 0) return doc;
+  const drop = new Set(ids);
+  const { body, annotations, unparseable } = parseDocument(doc);
+  const next = annotations.filter((a) => !drop.has(a.id));
+  if (next.length === annotations.length) return doc;
+  return composeDocument(body, next, unparseable);
+}
 function renameAnnotationCategory(doc, oldName, newName) {
   const { body, annotations, unparseable } = parseDocument(doc);
   let changed = false;
@@ -693,6 +701,7 @@ function defaultSettings() {
     gutterCommentsToolbar: makeToolbarHighlight("#c8e6c9", "#2e5d33"),
     textClickJumpToolbar: makeToolbarHighlight("#fff3a3", "#7a6f1f"),
     autoRepairOrphans: false,
+    promptOnNewOrphan: true,
     syncTextAndSidebar: true,
     sidebarClickJumpsToText: true,
     textClickJumpsToSidebar: true,
@@ -783,6 +792,7 @@ function normalizeSettings(raw) {
     "gutterCommentsEnabled",
     "gutterOnlyWhenAnnotated",
     "autoRepairOrphans",
+    "promptOnNewOrphan",
     "syncTextAndSidebar",
     "sidebarClickJumpsToText",
     "textClickJumpsToSidebar"
@@ -2944,6 +2954,15 @@ var MdAnnotationSettingTab = class extends import_obsidian3.PluginSettingTab {
         this.plugin.settings.autoRepairOrphans = v;
       }
     );
+    this.renderToggle(
+      containerEl,
+      "Tell me when an annotation orphans",
+      "Show a notice naming the annotation whose text has gone, with a button that deletes it on the spot. Ignoring the notice keeps the annotation \u2014 it is only ever removed by pressing that button, or from the sidebar",
+      () => this.plugin.settings.promptOnNewOrphan,
+      (v) => {
+        this.plugin.settings.promptOnNewOrphan = v;
+      }
+    );
   }
   // Categories are stored in this vault's own data.json. Obsidian Sync
   // replicates a vault to itself on other devices — it never bridges two
@@ -3659,6 +3678,25 @@ var AnnotationSidebarView = class extends import_obsidian5.ItemView {
         repaired === 0 ? "MD Annotation: no orphan could be placed with confidence" : `MD Annotation: re-anchored ${repaired} orphan${repaired === 1 ? "" : "s"}`
       );
     });
+    const del = row.createEl("button", { text: "Delete all orphans", cls: "mod-warning" });
+    del.setAttribute("aria-label", "Delete every orphaned annotation in this note");
+    del.addEventListener("click", () => {
+      const count = this.plugin.orphanCount(path);
+      if (count === 0) {
+        new import_obsidian5.Notice("MD Annotation: no orphans to delete");
+        return;
+      }
+      new SidebarConfirmModal(
+        this.app,
+        `Delete ${count} orphaned annotation${count === 1 ? "" : "s"} from this note? This cannot be undone.`,
+        () => {
+          const deleted = this.plugin.deleteOrphansInNote(path);
+          new import_obsidian5.Notice(
+            `MD Annotation: deleted ${deleted} orphaned annotation${deleted === 1 ? "" : "s"}`
+          );
+        }
+      ).open();
+    });
   }
   renderCard(root, path, annotation, outcome, commentNumber, body) {
     const isOrphan = outcome === void 0 || outcome.status === "orphaned";
@@ -3679,9 +3717,9 @@ var AnnotationSidebarView = class extends import_obsidian5.ItemView {
     if (isPointComment && commentNumber !== void 0) {
       quote.createEl("span", { text: String(commentNumber), cls: "mdann-card-num" });
     }
-    const excerpt2 = annotation.selector.exact.length > 120 ? annotation.selector.exact.slice(0, 120) + "\u2026" : annotation.selector.exact;
+    const excerpt3 = annotation.selector.exact.length > 120 ? annotation.selector.exact.slice(0, 120) + "\u2026" : annotation.selector.exact;
     const chip = quote.createEl("span", {
-      text: isPointComment ? "comment marker" : excerpt2 === "" ? "(empty quote)" : excerpt2,
+      text: isPointComment ? "comment marker" : excerpt3 === "" ? "(empty quote)" : excerpt3,
       cls: highlightClasses(annotation.type, annotation.category, this.plugin.settings)
     });
     chip.setCssProps(highlightStyleVars(annotation.type, annotation.category, this.plugin.settings));
@@ -3815,8 +3853,18 @@ var WRITE_DEBOUNCE_MS = 500;
 var DISK_REFRESH_DEBOUNCE_MS = 400;
 var SYNC_DEBOUNCE_MS = 150;
 var TEXT_FLASH_MS = 1200;
+var ORPHAN_PROMPT_DELAY_MS = 4e3;
+var ORPHAN_NOTICE_MS = 2e4;
 var READING_GUTTER_DEBOUNCE_MS = 60;
 var TOOLBAR_HIGHLIGHT_DELAY_MS = 50;
+var EXCERPT_LENGTH = 48;
+function excerpt2(text) {
+  const flat = text.replace(/\s+/g, " ").trim();
+  if (flat.length <= EXCERPT_LENGTH) return flat;
+  const cut = flat.slice(0, EXCERPT_LENGTH);
+  const space = cut.lastIndexOf(" ");
+  return (space > EXCERPT_LENGTH / 2 ? cut.slice(0, space) : cut) + "\u2026";
+}
 var TOGGLE_RIGHT_SIDEBAR_COMMAND_ID = "app:toggle-right-sidebar";
 var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
   constructor() {
@@ -3833,6 +3881,12 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
     this.readingGutterTimer = null;
     this.editorTimers = /* @__PURE__ */ new Map();
     this.diskTimers = /* @__PURE__ */ new Map();
+    // Orphan prompting state, per file path: which ids were already orphaned
+    // the last time the note resolved (so only a NEW orphan prompts), the ids
+    // waiting out ORPHAN_PROMPT_DELAY_MS, and that path's pending timer.
+    this.orphanedIds = /* @__PURE__ */ new Map();
+    this.pendingOrphans = /* @__PURE__ */ new Map();
+    this.orphanPromptTimers = /* @__PURE__ */ new Map();
     this.changeListeners = /* @__PURE__ */ new Set();
     // A one-shot request the sidebar consumes on its next render: scroll to
     // (and optionally flash/focus) the entry for `id`.
@@ -4038,12 +4092,14 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
         const state = this.states.get(oldPath);
         this.states.delete(oldPath);
         if (state) this.states.set(file.path, state);
+        this.forgetOrphanTracking(oldPath);
         this.notifyChange();
       })
     );
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
         this.states.delete(file.path);
+        this.forgetOrphanTracking(file.path);
         this.notifyChange();
       })
     );
@@ -4082,6 +4138,10 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
     this.editorTimers.clear();
     for (const timer of this.diskTimers.values()) window.clearTimeout(timer);
     this.diskTimers.clear();
+    for (const timer of this.orphanPromptTimers.values()) window.clearTimeout(timer);
+    this.orphanPromptTimers.clear();
+    this.pendingOrphans.clear();
+    this.orphanedIds.clear();
     if (this.syncTimer !== null) {
       window.clearTimeout(this.syncTimer);
       this.syncTimer = null;
@@ -4204,6 +4264,7 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
     if (this.settings.autoRepairOrphans) {
       this.repairOrphans(parsed.body, parsed.annotations, outcomes, path);
     }
+    this.trackOrphans(path, parsed.annotations, outcomes);
     const state = {
       body: parsed.body,
       annotations: parsed.annotations,
@@ -4629,6 +4690,133 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
       repaired++;
     }
     return repaired;
+  }
+  // ── Orphan prompting ─────────────────────────────────────────────────────
+  // Called on every resolution of `path`. Diffs today's orphans against the
+  // last set to find the ones that JUST broke, and starts (or extends) the
+  // settle timer for them. An annotation that comes back before the timer
+  // fires is dropped from the pending set, so ordinary editing is silent.
+  trackOrphans(path, annotations, outcomes) {
+    var _a;
+    const nowOrphaned = /* @__PURE__ */ new Set();
+    for (const annotation of annotations) {
+      const outcome = outcomes.get(annotation.id);
+      if (!outcome || outcome.status === "orphaned") nowOrphaned.add(annotation.id);
+    }
+    const previously = this.orphanedIds.get(path);
+    this.orphanedIds.set(path, nowOrphaned);
+    if (!this.settings.promptOnNewOrphan) return;
+    if (previously === void 0) return;
+    const pending = (_a = this.pendingOrphans.get(path)) != null ? _a : /* @__PURE__ */ new Set();
+    for (const id of [...pending]) {
+      if (!nowOrphaned.has(id)) pending.delete(id);
+    }
+    for (const id of nowOrphaned) {
+      if (!previously.has(id)) pending.add(id);
+    }
+    if (pending.size === 0) {
+      this.pendingOrphans.delete(path);
+      this.clearOrphanTimer(path);
+      return;
+    }
+    this.pendingOrphans.set(path, pending);
+    this.clearOrphanTimer(path);
+    this.orphanPromptTimers.set(
+      path,
+      window.setTimeout(() => {
+        this.orphanPromptTimers.delete(path);
+        this.promptForOrphans(path);
+      }, ORPHAN_PROMPT_DELAY_MS)
+    );
+  }
+  clearOrphanTimer(path) {
+    const timer = this.orphanPromptTimers.get(path);
+    if (timer !== void 0) {
+      window.clearTimeout(timer);
+      this.orphanPromptTimers.delete(path);
+    }
+  }
+  forgetOrphanTracking(path) {
+    this.clearOrphanTimer(path);
+    this.pendingOrphans.delete(path);
+    this.orphanedIds.delete(path);
+  }
+  // One Notice per settled batch, naming a single orphan by its text or
+  // counting several. Its Delete button removes exactly the ids in the batch;
+  // letting the Notice expire keeps them, still listed in the sidebar.
+  promptForOrphans(path) {
+    var _a;
+    const pending = this.pendingOrphans.get(path);
+    this.pendingOrphans.delete(path);
+    if (!pending || pending.size === 0) return;
+    const state = this.states.get(path);
+    if (!state) return;
+    const ids = [...pending].filter((id) => {
+      const outcome = state.outcomes.get(id);
+      return state.annotations.some((a) => a.id === id) && (!outcome || outcome.status === "orphaned");
+    });
+    if (ids.length === 0) return;
+    const first = state.annotations.find((a) => a.id === ids[0]);
+    const quote = (_a = first == null ? void 0 : first.selector.exact) != null ? _a : "";
+    const label = ids.length > 1 ? `${ids.length} annotations no longer match any text in this note` : quote === "" ? "A comment marker no longer matches anywhere in this note" : `Annotation "${excerpt2(quote)}" no longer matches any text in this note`;
+    const frag = activeDocument.createDocumentFragment();
+    frag.createDiv({ text: `MD Annotation: ${label}`, cls: "mdann-notice-text" });
+    const row = frag.createDiv({ cls: "mdann-notice-buttons" });
+    const del = row.createEl("button", {
+      text: ids.length > 1 ? `Delete ${ids.length}` : "Delete",
+      cls: "mod-warning"
+    });
+    del.addEventListener("click", () => {
+      this.deleteAnnotations(path, ids);
+      new import_obsidian6.Notice(
+        `MD Annotation: deleted ${ids.length} orphaned annotation${ids.length === 1 ? "" : "s"}`
+      );
+    });
+    const keep = row.createEl("button", { text: "Keep" });
+    keep.setAttribute("aria-label", "Leave it in the sidebar to re-anchor later");
+    new import_obsidian6.Notice(frag, ORPHAN_NOTICE_MS);
+    void keep;
+  }
+  // ── Bulk deletion ────────────────────────────────────────────────────────
+  // One queued rewrite for the whole batch rather than one per id, so a
+  // cleanup of twenty orphans is a single edit to the note.
+  deleteAnnotations(path, ids) {
+    if (ids.length === 0) return 0;
+    const drop = new Set(ids);
+    this.queue.request(path, (text) => removeAnnotations(text, ids));
+    const state = this.states.get(path);
+    let removed = ids.length;
+    if (state) {
+      const before = state.annotations.length;
+      state.annotations = state.annotations.filter((a) => !drop.has(a.id));
+      removed = before - state.annotations.length;
+      for (const id of drop) state.outcomes.delete(id);
+      this.decorateAllFor(path);
+      this.notifyChange();
+    }
+    const tracked = this.orphanedIds.get(path);
+    if (tracked) for (const id of drop) tracked.delete(id);
+    return removed;
+  }
+  // How many orphans the note currently holds, for the sidebar's delete
+  // confirmation (which counts the whole note, not just the filtered list).
+  orphanCount(path) {
+    const state = this.states.get(path);
+    if (!state) return 0;
+    return state.annotations.filter((a) => {
+      const outcome = state.outcomes.get(a.id);
+      return !outcome || outcome.status === "orphaned";
+    }).length;
+  }
+  // Sidebar "Delete all orphans" button.
+  deleteOrphansInNote(path) {
+    const state = this.states.get(path);
+    if (!state) return 0;
+    const ids = state.annotations.filter((a) => {
+      const outcome = state.outcomes.get(a.id);
+      return !outcome || outcome.status === "orphaned";
+    }).map((a) => a.id);
+    return this.deleteAnnotations(path, ids);
   }
   // Sidebar "Fix orphans" button: the same pass, on the note already parsed.
   repairOrphansInNote(path) {

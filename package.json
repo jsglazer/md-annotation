@@ -1,6 +1,6 @@
 {
 	"name": "md-annotation",
-	"version": "1.0.22",
+	"version": "1.0.23",
 	"description": "Delimiter-free annotations and comments for Obsidian: highlights anchored by text-quote selectors, stored in an end-of-file block.",
 	"main": "main.js",
 	"type": "module",

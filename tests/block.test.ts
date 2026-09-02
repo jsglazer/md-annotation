@@ -7,6 +7,7 @@ import {
 	normalizeBlock,
 	parseDocument,
 	removeAnnotation,
+	removeAnnotations,
 	removeUnparseableLine,
 	renameAnnotationCategory,
 	serializeAnnotationLine,
@@ -192,6 +193,26 @@ describe('document edit helpers never touch the body', () => {
 		expect(parseDocument(removed).annotations).toEqual([]);
 		expect(removed).toContain(corrupt); // preserved lines survive removal
 		expect(bodyOf(removed)).toBe(BODY);
+	});
+
+	it('removeAnnotations drops a batch in one rewrite', () => {
+		const b = makeAnnotation('b2');
+		const c = makeAnnotation('c3');
+		const many = docWith([a, b, c].map(serializeAnnotationLine).concat([corrupt]));
+		const removed = removeAnnotations(many, ['a1', 'c3']);
+		expect(parseDocument(removed).annotations.map((x) => x.id)).toEqual(['b2']);
+		expect(removed).toContain(corrupt); // preserved lines survive a batch too
+		expect(bodyOf(removed)).toBe(BODY);
+		// No-op cases return the document identically.
+		expect(removeAnnotations(many, [])).toBe(many);
+		expect(removeAnnotations(many, ['nope'])).toBe(many);
+	});
+
+	it('removeAnnotations of every annotation leaves no block when nothing is preserved', () => {
+		const clean = docWith([a, makeAnnotation('b2')].map(serializeAnnotationLine));
+		const removed = removeAnnotations(clean, ['a1', 'b2']);
+		expect(removed).not.toContain(BLOCK_OPEN);
+		expect(removed).toBe(parseDocument(clean).body);
 	});
 
 	it('removeUnparseableLine removes exactly the given raw line', () => {

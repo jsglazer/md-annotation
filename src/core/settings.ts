@@ -123,6 +123,12 @@ export interface MdAnnotationSettings {
 	// the active note as it is parsed.
 	autoRepairOrphans: boolean;
 
+	// On by default: when an annotation stops matching (its text was deleted or
+	// rewritten), a Notice names it and offers a one-click delete. Nothing is
+	// removed unless that button is pressed — the Notice expiring means "keep".
+	// Prompts are debounced, so retyping a sentence does not fire one mid-edit.
+	promptOnNewOrphan: boolean;
+
 	// Navigation toggles (General tab), all on by default. Each governs one
 	// direction of the text ⇄ sidebar link; the "Sync text and sidebar" command
 	// flips syncTextAndSidebar, so the command and the setting are one state.
@@ -183,6 +189,7 @@ export function defaultSettings(): MdAnnotationSettings {
 		gutterCommentsToolbar: makeToolbarHighlight('#c8e6c9', '#2e5d33'),
 		textClickJumpToolbar: makeToolbarHighlight('#fff3a3', '#7a6f1f'),
 		autoRepairOrphans: false,
+		promptOnNewOrphan: true,
 		syncTextAndSidebar: true,
 		sidebarClickJumpsToText: true,
 		textClickJumpsToSidebar: true,
@@ -302,6 +309,7 @@ export function normalizeSettings(raw: unknown): MdAnnotationSettings {
 		'gutterCommentsEnabled',
 		'gutterOnlyWhenAnnotated',
 		'autoRepairOrphans',
+		'promptOnNewOrphan',
 		'syncTextAndSidebar',
 		'sidebarClickJumpsToText',
 		'textClickJumpsToSidebar',

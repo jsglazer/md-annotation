@@ -779,9 +779,28 @@ body.theme-dark .mdann-widget-hl {
 .mdann-fix-orphans {
 	display: flex;
 	justify-content: flex-end;
+	gap: var(--size-4-2);
+	flex-wrap: wrap;
 	padding: 0 0 var(--size-4-2);
 }
 
 .mdann-fix-orphans button {
+	font-size: var(--font-ui-smaller);
+}
+
+/* Orphan notice: the "this annotation's text is gone" prompt, with its
+   Delete/Keep pair. Both buttons let the click bubble, so either one also
+   dismisses the notice. */
+.mdann-notice-text {
+	margin-bottom: var(--size-4-2);
+}
+
+.mdann-notice-buttons {
+	display: flex;
+	justify-content: flex-end;
+	gap: var(--size-4-2);
+}
+
+.mdann-notice-buttons button {
 	font-size: var(--font-ui-smaller);
 }

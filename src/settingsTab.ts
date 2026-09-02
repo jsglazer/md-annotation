@@ -580,6 +580,16 @@ export class MdAnnotationSettingTab extends PluginSettingTab {
 				this.plugin.settings.autoRepairOrphans = v;
 			},
 		);
+
+		this.renderToggle(
+			containerEl,
+			'Tell me when an annotation orphans',
+			'Show a notice naming the annotation whose text has gone, with a button that deletes it on the spot. Ignoring the notice keeps the annotation — it is only ever removed by pressing that button, or from the sidebar',
+			() => this.plugin.settings.promptOnNewOrphan,
+			(v) => {
+				this.plugin.settings.promptOnNewOrphan = v;
+			},
+		);
 	}
 
 	// Categories are stored in this vault's own data.json. Obsidian Sync
