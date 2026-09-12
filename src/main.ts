@@ -38,7 +38,7 @@ import {
 	isEmbeddedEditorView,
 } from './editor/livePreview';
 import { ReadingGutter } from './editor/readingGutter';
-import { createReadingPostProcessor, sweepHighlightSpans } from './editor/readingView';
+import { createReadingPostProcessor, paintLivePreviewTables, sweepHighlightSpans } from './editor/readingView';
 import { MdAnnotationSettingTab } from './settingsTab';
 import type { FileAnnotationState } from './state';
 import { CategorySuggestModal } from './ui/categorySuggest';
@@ -96,6 +96,9 @@ export default class MdAnnotationPlugin extends Plugin {
 	// the preview DOM that Obsidian rebuilds on every re-render).
 	private readingGutters = new Map<HTMLElement, ReadingGutter>();
 	private readingGutterTimer: number | null = null;
+	// Bumped by every decoration pass; a Live Preview table cell painted under
+	// an older value is repainted (see paintLivePreviewTables).
+	private tablePaintGeneration = 0;
 	// Recolours the Note Toolbar items bound to the two gutter toggles and the
 	// "Text click jumps to sidebar" toggle.
 	private toolbarHighlighter!: ToolbarHighlighter;
@@ -701,7 +704,42 @@ export default class MdAnnotationPlugin extends Plugin {
 		applyEditorDecorations(view, state.body, state.annotations, state.outcomes, this.settings, (id) => {
 			this.revealAnnotation(path, id);
 		});
+		// Every cell is stale now: annotations, their positions or the settings
+		// that style them may all have changed.
+		this.tablePaintGeneration++;
+		this.paintTables(view);
 		this.gutters.get(view)?.sync(path, state.annotations, state.outcomes, this.settings);
+	}
+
+	onEditorRedrawn(view: EditorView): void {
+		if (this.paintTables(view)) this.gutters.get(view)?.requestLayout();
+	}
+
+	// Paint annotations into the Live Preview table widgets of one editor.
+	// Skipped while the cached state describes a different text than the
+	// editor holds (an edit not yet re-resolved): its offsets would land in the
+	// wrong cells. The decoration pass that follows resolution repaints.
+	private paintTables(view: EditorView): boolean {
+		if (!view.dom.closest('.markdown-source-view')?.classList.contains('is-live-preview')) return false;
+		const path = editorViewPath(view);
+		if (path === null) return false;
+		const state = this.states.get(path);
+		if (!state || !view.contentDOM.querySelector('.cm-table-widget')) return false;
+		if (view.state.doc.sliceString(0, state.body.length) !== state.body) return false;
+		return paintLivePreviewTables(
+			view.contentDOM,
+			(el) => {
+				try {
+					return view.posAtDOM(el);
+				} catch {
+					return null;
+				}
+			},
+			this,
+			path,
+			state,
+			this.tablePaintGeneration,
+		);
 	}
 
 	private decorateAllFor(path: string): void {

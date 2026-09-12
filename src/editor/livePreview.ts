@@ -62,6 +62,9 @@ export interface EditorHost {
 	// The editor reflowed, resized, or scrolled a new stretch of document into
 	// view — the margin gutter re-places its cards from the new geometry.
 	onEditorGeometryChange(view: EditorView): void;
+	// CodeMirror redrew the document — any Live Preview table widget it just
+	// (re)built needs its cells painted.
+	onEditorRedrawn(view: EditorView): void;
 }
 
 export const EDITOR_RESOLVE_DEBOUNCE_MS = 250;
@@ -143,11 +146,30 @@ export function buildEditorExtension(host: EditorHost): Extension {
 	// ones that scrolling causes without any transaction.
 	const widgetPainter = ViewPlugin.fromClass(
 		class {
-			constructor(private view: EditorView) {}
+			// Obsidian can build a table widget's contents outside any CodeMirror
+			// update (it defers rendering until the document has fully loaded),
+			// and no redraw hook fires for that. Watching for a <table> being
+			// inserted catches it; our own markers and spans are never tables,
+			// so painting cannot retrigger this.
+			private readonly tableObserver: MutationObserver;
+			private frame: number | null = null;
+
+			constructor(private view: EditorView) {
+				const win = view.dom.ownerDocument.defaultView ?? window;
+				this.tableObserver = new win.MutationObserver((mutations) => {
+					if (this.frame !== null || !mutations.some(addsTable)) return;
+					this.frame = win.requestAnimationFrame(() => {
+						this.frame = null;
+						if (!isEmbeddedEditorView(this.view)) host.onEditorRedrawn(this.view);
+					});
+				});
+				this.tableObserver.observe(view.contentDOM, { childList: true, subtree: true });
+			}
 
 			docViewUpdate(view: EditorView): void {
 				if (isEmbeddedEditorView(view)) return;
 				paintWidgetHighlights(view);
+				host.onEditorRedrawn(view);
 			}
 
 			// Belt and braces: docViewUpdate is a relatively recent addition to
@@ -159,15 +181,29 @@ export function buildEditorExtension(host: EditorHost): Extension {
 			update(update: { view: EditorView }): void {
 				const view = update.view;
 				if (isEmbeddedEditorView(view)) return;
-				view.requestMeasure({ read: () => null, write: () => paintWidgetHighlights(view) });
+				view.requestMeasure({
+					read: () => null,
+					write: () => {
+						paintWidgetHighlights(view);
+						host.onEditorRedrawn(view);
+					},
+				});
 			}
 
 			destroy(): void {
+				this.tableObserver.disconnect();
+				if (this.frame !== null) (this.view.dom.ownerDocument.defaultView ?? window).cancelAnimationFrame(this.frame);
 				clearWidgetHighlights(this.view);
 			}
 		},
 	);
 	return [annotationDecoField, watcher, clickReveal, widgetPainter];
+}
+
+function addsTable(mutation: MutationRecord): boolean {
+	return Array.from(mutation.addedNodes).some(
+		(node) => node.instanceOf(HTMLElement) && (node.tagName === 'TABLE' || node.querySelector('table') !== null),
+	);
 }
 
 // ── Highlighting across Live Preview widgets ───────────────────────────────

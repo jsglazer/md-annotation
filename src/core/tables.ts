@@ -13,27 +13,25 @@
 //     gives it no section info — so the cell has to be identified structurally,
 //     by matching the rendered table's grid back to one parsed from the note.
 //
-// Where a table ENDS is not one fixed answer: Live Preview's editor widget
-// boundary comes from the `@lezer/markdown` GFM parser CodeMirror is built on,
-// which (verified directly against that package) keeps absorbing a table
-// through any non-blank line that doesn't start a new block — even one with no
-// pipe at all — as a further single-cell row. Reading View's separate HTML
-// renderer does NOT do this (verified against an actual note rendered in
-// Obsidian): a pipe-less line right after a table renders as an ordinary,
-// separate line. Both are real, simultaneously, for the same source text —
-// which line is skipped as "inside a table" for CM decorations, and which grid
-// shape a rendered `<table>` is matched against, genuinely differ between the
-// two views. `tableGrids` below returns BOTH candidate parses whenever they
-// diverge (same start, different row count from the lazily-absorbed tail), so
-// each caller's existing shape/text matching picks whichever one the view it
-// is actually running in produced — never a guess, since the two candidates
-// can never share a row count when they diverge.
+// Where a table ENDS follows Obsidian's own editor tokenizer, not GFM. Live
+// Preview's table widget covers exactly the consecutive lines its HyperMD mode
+// tags "HyperMD-table-row" (read from Obsidian 1.13.7's app.js), and that mode
+// keeps a table going only while each next line fits the table's style:
+//
+//   - a table whose header starts with a pipe continues through lines that
+//     START with a pipe (/^\|/);
+//   - a table whose header has no leading pipe continues through lines that
+//     contain a pipe but do not start with one (/^\s*[^|].*\|/).
+//
+// Anything else ends it — including a pipe-less line with no blank line before
+// it, which GFM (and @lezer/markdown) would absorb as a further row. Obsidian
+// does not, in Live Preview or in Reading View, so neither does this.
 
 const DELIMITER_ROW = /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?\s*$/;
+const PIPED_ROW = /^\|/;
+const UNPIPED_ROW = /^\s*[^|].*\|/;
 
-// A table needs a pipe to START — this applies to both boundary rules, and is
-// only used to recognize the candidate header line before a delimiter row
-// confirms it.
+// A table needs a pipe to start; a delimiter row directly below confirms it.
 function looksLikeTableRow(line: string): boolean {
 	return line.includes('|');
 }
@@ -42,42 +40,9 @@ function isDelimiterRow(line: string): boolean {
 	return line.includes('-') && DELIMITER_ROW.test(line);
 }
 
-// Block-starting lines that interrupt a table the same way they interrupt an
-// ordinary paragraph under CommonMark's lazy-continuation rules — verified
-// directly against `@lezer/markdown`'s GFM extension (heading/list/blockquote/
-// fence all end the table there exactly as modeled here; a bare thematic break
-// is a rarer edge case where Lezer instead reinterprets the whole preceding
-// table as a Setext-heading paragraph, which this treats as "ends the table"
-// too — a safe approximation of an already-pathological input).
-const HEADING_LINE = /^ {0,3}#{1,6}(?:[ \t]|$)/;
-const THEMATIC_BREAK_LINE = /^ {0,3}(?:(?:-[ \t]*){3,}|(?:_[ \t]*){3,}|(?:\*[ \t]*){3,})$/;
-const BLOCKQUOTE_LINE = /^ {0,3}>/;
-const LIST_LINE = /^ {0,3}(?:[-+*](?:[ \t]|$)|\d{1,9}[.)](?:[ \t]|$))/;
-const FENCE_LINE = /^ {0,3}(?:`{3,}|~{3,})/;
-
-// Whether `line` continues an already-open table under the LAZY (Live Preview
-// / Lezer) rule: non-blank and not a block-starter, pipes or not.
-function continuesTableLazily(line: string): boolean {
-	if (line.trim() === '') return false;
-	return (
-		!HEADING_LINE.test(line) &&
-		!THEMATIC_BREAK_LINE.test(line) &&
-		!BLOCKQUOTE_LINE.test(line) &&
-		!LIST_LINE.test(line) &&
-		!FENCE_LINE.test(line)
-	);
-}
-
-// Pad or truncate a parsed row to the header's column count — what a lazily
-// absorbed row actually renders as (missing trailing cells empty, extra cells
-// dropped) — so it lines up with the DOM's cell count for matchTableGrid's
-// shape comparison.
-function normalizeRowLength(cells: TableCell[], columnCount: number, lineEnd: number): TableCell[] {
-	if (cells.length === columnCount) return cells;
-	if (cells.length > columnCount) return cells.slice(0, columnCount);
-	const padded = cells.slice();
-	while (padded.length < columnCount) padded.push({ text: '', start: lineEnd, end: lineEnd });
-	return padded;
+// The continuation rule for a table with this header — see the comment above.
+function rowRuleFor(header: string): RegExp {
+	return header.startsWith('|') ? PIPED_ROW : UNPIPED_ROW;
 }
 
 export interface TextRange {
@@ -100,6 +65,8 @@ export interface TableGrid {
 	start: number;
 	end: number;
 	rows: TableCell[][];
+	// The [start, end) span of each row's whole source line, parallel to `rows`.
+	rowLines: TextRange[];
 }
 
 // Split one row into cells on unescaped pipes. The pipes that open and close a
@@ -135,16 +102,10 @@ function splitRow(line: string, lineStart: number): TableCell[] {
 	return cells;
 }
 
-// Parses every GFM table under one continuation rule: a header row immediately
-// followed by a delimiter row (e.g. "| --- | --- |"), extending through
-// however many further rows follow per `continues`. `lazy` additionally
-// normalizes each row to the header's column count, matching how a lazily
-// absorbed pipe-less row actually renders.
-function parseTableGrids(
-	text: string,
-	continues: (line: string) => boolean,
-	lazy: boolean,
-): TableGrid[] {
+// Every table in `text`: a header row immediately followed by a delimiter row
+// (e.g. "| --- | --- |"), extending through however many further lines
+// Obsidian's continuation rule accepts.
+export function tableGrids(text: string): TableGrid[] {
 	const lines = text.split('\n');
 	const lineStarts: number[] = [];
 	let offset = 0;
@@ -164,7 +125,7 @@ function parseTableGrids(
 			looksLikeTableRow(header) &&
 			isDelimiterRow(delimiter)
 		) {
-			const columnCount = splitRow(header, lineStarts[i] ?? 0).length;
+			const rule = rowRuleFor(header);
 			// The delimiter row is structure, not content, so it is left out of
 			// `rows` — a renderer does not emit a <tr> for it either.
 			const rowLines = [i];
@@ -172,7 +133,7 @@ function parseTableGrids(
 			let j = i + 2;
 			while (j < lines.length) {
 				const row = lines[j];
-				if (row === undefined || !continues(row)) break;
+				if (row === undefined || !rule.test(row)) break;
 				rowLines.push(j);
 				endLine = j;
 				j++;
@@ -180,12 +141,11 @@ function parseTableGrids(
 			grids.push({
 				start: lineStarts[i] ?? 0,
 				end: (lineStarts[endLine] ?? 0) + (lines[endLine] ?? '').length,
-				rows: rowLines.map((ln) => {
-					const lineText = lines[ln] ?? '';
-					const lineStart = lineStarts[ln] ?? 0;
-					const cells = splitRow(lineText, lineStart);
-					return lazy ? normalizeRowLength(cells, columnCount, lineStart + lineText.length) : cells;
-				}),
+				rows: rowLines.map((ln) => splitRow(lines[ln] ?? '', lineStarts[ln] ?? 0)),
+				rowLines: rowLines.map((ln) => ({
+					start: lineStarts[ln] ?? 0,
+					end: (lineStarts[ln] ?? 0) + (lines[ln] ?? '').length,
+				})),
 			});
 			i = j;
 			continue;
@@ -195,35 +155,9 @@ function parseTableGrids(
 	return grids;
 }
 
-// Every GFM table in `text`, as BOTH boundary candidates wherever they
-// diverge — see the module comment above for why there are two. Most tables
-// (nothing non-blank and pipe-less immediately follows) parse identically
-// either way, so only one candidate is produced for them; a table followed
-// with no blank line by ordinary text produces a second, longer candidate for
-// exactly that table (same start, more rows) alongside the strict one.
-export function tableGrids(text: string): TableGrid[] {
-	const strict = parseTableGrids(text, looksLikeTableRow, false);
-	const lazy = parseTableGrids(text, continuesTableLazily, true);
-	const lazyByStart = new Map(lazy.map((g) => [g.start, g]));
-	const grids: TableGrid[] = [];
-	for (const s of strict) {
-		grids.push(s);
-		const l = lazyByStart.get(s.start);
-		if (l && l.rows.length !== s.rows.length) grids.push(l);
-	}
-	return grids;
-}
-
-// [start, end) character ranges of every table in `text` — the widest
-// (lazy-boundary) end wherever the two candidates diverge, since callers use
-// this to decide what a Live Preview table widget covers.
+// [start, end) character ranges of every table in `text`.
 export function tableRanges(text: string): TextRange[] {
-	const byStart = new Map<number, TextRange>();
-	for (const grid of tableGrids(text)) {
-		const existing = byStart.get(grid.start);
-		if (!existing || grid.end > existing.end) byStart.set(grid.start, { start: grid.start, end: grid.end });
-	}
-	return [...byStart.values()];
+	return tableGrids(text).map((g) => ({ start: g.start, end: g.end }));
 }
 
 // Whether [from, to) falls at least partly inside any of `ranges`. A point
@@ -259,4 +193,61 @@ export function matchTableGrid(
 		g.rows.every((row, r) => row.every((cell, c) => cell.text === rendered[r]?.[c])),
 	);
 	return sameText.length === 1 ? (sameText[0] ?? null) : null;
+}
+
+// Where an annotation resolved at [from, to) in the note falls within one cell
+// of `grid`, as offsets into that cell's trimmed source text — or null when it
+// does not touch the cell.
+//
+// A highlight is clipped to the cell, so one that spans several cells is drawn
+// in each of them. A point comment belongs to exactly one cell of its row: the
+// last cell starting at or before it (the first cell when it sits before every
+// cell), clamped into that cell's text. That way a comment placed in a cell's
+// padding, or just past the row's closing pipe, still shows up in the cell it
+// visibly sits in rather than vanishing between cells.
+export function placeInCell(
+	grid: TableGrid,
+	row: number,
+	col: number,
+	from: number,
+	to: number,
+): TextRange | null {
+	const cells = grid.rows[row];
+	const cell = cells?.[col];
+	const line = grid.rowLines[row];
+	if (!cells || !cell || !line) return null;
+	if (from === to) {
+		if (from < line.start || from > line.end) return null;
+		let owner = 0;
+		for (let c = 0; c < cells.length; c++) {
+			if ((cells[c]?.start ?? Infinity) <= from) owner = c;
+		}
+		if (owner !== col) return null;
+		const at = Math.max(cell.start, Math.min(from, cell.end)) - cell.start;
+		return { start: at, end: at };
+	}
+	const start = Math.max(from, cell.start);
+	const end = Math.min(to, cell.end);
+	if (start >= end) return null;
+	return { start: start - cell.start, end: end - cell.start };
+}
+
+// Maps offsets in a cell's markdown source onto the text it renders to, for
+// source whose inline markup (`**bold**`, `code`, `\|`…) is simply dropped
+// on rendering. The rendered text is then a subsequence of the source, and
+// walking the two together pairs each rendered character with the source
+// character it came from. Returns null when the rendered text is NOT a
+// subsequence (a wikilink alias, an entity…) — the caller then falls back to
+// matching the selector, rather than trusting a mapping that has lost track.
+export function sourceToRenderedOffsets(source: string, rendered: string): ((offset: number) => number) | null {
+	// before[i] = how many rendered characters come from source[0..i).
+	const before = new Array<number>(source.length + 1);
+	let j = 0;
+	for (let i = 0; i < source.length; i++) {
+		before[i] = j;
+		if (j < rendered.length && source[i] === rendered[j]) j++;
+	}
+	before[source.length] = j;
+	if (j !== rendered.length) return null;
+	return (offset) => before[Math.max(0, Math.min(offset, source.length))] ?? j;
 }

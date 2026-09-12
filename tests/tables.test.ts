@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { matchTableGrid, overlapsAny, tableGrids, tableRanges } from '../src/core/tables';
+import {
+	matchTableGrid,
+	overlapsAny,
+	placeInCell,
+	sourceToRenderedOffsets,
+	tableGrids,
+	tableRanges,
+} from '../src/core/tables';
 
 describe('tableRanges', () => {
 	it('finds a simple table: header row + delimiter row + data rows', () => {
@@ -22,29 +29,32 @@ describe('tableRanges', () => {
 		expect(tableRanges(text)).toHaveLength(0);
 	});
 
-	// Verified against @lezer/markdown's GFM extension (what Obsidian's Live
-	// Preview editor is built on): it keeps absorbing a table through any
-	// non-blank, non-block-starting line — pipe or not — so this whole blob
-	// parses there as ONE table, not two. tableRanges feeds Live Preview's
-	// decoration-skip check, so it has to reflect that widest boundary: a
-	// decoration anywhere in this span would be swallowed by the one table
-	// widget Live Preview actually draws.
-	it('treats a pipe-less line as continuing the table, matching Live Preview', () => {
+	// Obsidian's editor (HyperMD mode, read from Obsidian 1.13.7's app.js) ends
+	// a table at the first line that does not fit its style — GFM's lazy
+	// continuation of a pipe-less line does not happen there.
+	it('ends a piped table at a line that does not start with a pipe', () => {
 		const text = ['| A |', '| - |', '| 1 |', 'no pipe here', '| B |', '| - |', '| 2 |'].join('\n');
-		expect(overlapsAny(tableRanges(text), 0, text.length)).toBe(true);
+		const ranges = tableRanges(text);
+		expect(ranges).toHaveLength(2);
+		expect(text.slice(ranges[0]?.start, ranges[0]?.end)).toBe('| A |\n| - |\n| 1 |');
 	});
 
-	// Verified against an actual note rendered in Obsidian (Reading View):
-	// the SAME text renders there as two separate tables, with the pipe-less
-	// line as its own ordinary paragraph in between — Reading View's renderer
-	// does not do GFM's lazy row continuation. tableGrids has to keep offering
-	// this narrower parse too, since it is what a real Reading View <table>'s
-	// shape will match.
-	it('also keeps the strict (pipe-required) parse, matching Reading View', () => {
-		const text = ['| A |', '| - |', '| 1 |', 'no pipe here', '| B |', '| - |', '| 2 |'].join('\n');
+	it('ends a piped table even at a line that contains a pipe mid-line', () => {
+		const text = ['| A | B |', '| - | - |', '| 1 | 2 |', 'x | y'].join('\n');
+		expect(text.slice(tableRanges(text)[0]?.start, tableRanges(text)[0]?.end)).toBe(
+			'| A | B |\n| - | - |\n| 1 | 2 |',
+		);
+	});
+
+	it('continues a table with no outer pipes through lines that contain one', () => {
+		const text = ['A | B', '- | -', '1 | 2', '3 | 4', 'plain'].join('\n');
 		const grids = tableGrids(text);
-		const strictShapes = grids.filter((g) => g.rows.length === 2).map((g) => g.rows[0]?.[0]?.text);
-		expect(strictShapes).toEqual(['A', 'B']);
+		expect(grids).toHaveLength(1);
+		expect(grids[0]?.rows.map((r) => r.map((c) => c.text))).toEqual([
+			['A', 'B'],
+			['1', '2'],
+			['3', '4'],
+		]);
 	});
 
 	it('recognizes alignment markers in the delimiter row', () => {
@@ -110,20 +120,10 @@ describe('tableGrids', () => {
 		expect(grids[0]?.rows[1]?.map((c) => c.text)).toEqual(['x \\| y', 'z']);
 	});
 
-	// GFM pads a short row's missing trailing cells as empty when rendering, so
-	// the lazily-absorbed candidate (what Live Preview's widget actually
-	// contains) has to match that shape — otherwise matchTableGrid's row-length
-	// comparison can never line it up with what is on screen there.
-	it('pads a lazily-absorbed row to the header column count', () => {
-		const grids = tableGrids(['| a | b | c |', '| - | - | - |', 'just one cell'].join('\n'));
-		const lazy = grids.find((g) => g.rows.length === 2);
-		expect(lazy?.rows[1]?.map((c) => c.text)).toEqual(['just one cell', '', '']);
-	});
-
-	// A table with nothing pipe-less immediately after it parses identically
-	// either way — only one candidate, not a spurious duplicate.
-	it('produces exactly one grid for a table nothing lazily continues', () => {
-		expect(tableGrids(TABLE)).toHaveLength(1);
+	it('records each row\'s whole source line', () => {
+		const grids = tableGrids(TABLE);
+		const line = grids[0]?.rowLines[1];
+		expect(TABLE.slice(line?.start, line?.end)).toBe(TABLE.split('\n')[2]);
 	});
 });
 
@@ -159,5 +159,62 @@ describe('matchTableGrid', () => {
 
 	it('returns null when nothing matches', () => {
 		expect(matchTableGrid(tableGrids(TWO), [['X', 'Y', 'Z', 'W']])).toBeNull();
+	});
+});
+
+describe('placeInCell', () => {
+	const TEXT = ['| a | bb |', '| - | -- |', '| xy | z |'].join('\n');
+	const grid = tableGrids(TEXT)[0]!;
+	const at = (needle: string): number => TEXT.indexOf(needle);
+
+	it('clips a highlight to the cell it overlaps', () => {
+		const from = at('xy');
+		expect(placeInCell(grid, 1, 0, from, from + 2)).toEqual({ start: 0, end: 2 });
+		expect(placeInCell(grid, 1, 1, from, from + 2)).toBeNull();
+	});
+
+	it('splits a highlight across cells into per-cell pieces', () => {
+		const from = at('y');
+		const to = at('z') + 1;
+		expect(placeInCell(grid, 1, 0, from, to)).toEqual({ start: 1, end: 2 });
+		expect(placeInCell(grid, 1, 1, from, to)).toEqual({ start: 0, end: 1 });
+	});
+
+	it('gives a point in a cell to that cell only', () => {
+		const p = at('xy') + 1;
+		expect(placeInCell(grid, 1, 0, p, p)).toEqual({ start: 1, end: 1 });
+		expect(placeInCell(grid, 1, 1, p, p)).toBeNull();
+	});
+
+	it('gives a point in trailing padding to the cell before it, clamped to its end', () => {
+		const p = at('xy') + 3; // the space after "xy", before the pipe
+		expect(placeInCell(grid, 1, 0, p, p)).toEqual({ start: 2, end: 2 });
+	});
+
+	it('gives a point at the very end of the row to the last cell', () => {
+		const p = TEXT.length;
+		expect(placeInCell(grid, 1, 1, p, p)).toEqual({ start: 1, end: 1 });
+	});
+
+	it('ignores a point on a different row', () => {
+		const p = at('bb');
+		expect(placeInCell(grid, 1, 1, p, p)).toBeNull();
+	});
+});
+
+describe('sourceToRenderedOffsets', () => {
+	it('maps across dropped inline markup', () => {
+		const source = 'Set the **Imp** column — `P` / `R`.';
+		const rendered = 'Set the Imp column — P / R.';
+		const map = sourceToRenderedOffsets(source, rendered)!;
+		expect(map).not.toBeNull();
+		expect(map(source.length)).toBe(rendered.length);
+		const s = source.indexOf('Imp');
+		expect(rendered.slice(map(s), map(s + 3))).toBe('Imp');
+	});
+
+	it('gives up when the rendered text is not a subsequence of the source', () => {
+		expect(sourceToRenderedOffsets('[[Page|alias]]', 'alias')).not.toBeNull();
+		expect(sourceToRenderedOffsets('[[Ops#7. Z]]', 'Ops > 7. Z')).toBeNull();
 	});
 });

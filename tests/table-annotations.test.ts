@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { resolveSelector } from '../src/core/matcher';
-import { tableGrids, tableRanges, matchTableGrid, overlapsAny } from '../src/core/tables';
+import { matchTableGrid, overlapsAny, placeInCell, sourceToRenderedOffsets, tableGrids, tableRanges } from '../src/core/tables';
 import type { TableCell } from '../src/core/tables';
 
 // The note body from the reported case, trimmed to what matters.
@@ -100,11 +100,8 @@ describe('annotation inside a table cell', () => {
 
 // Reported case, reduced to what matters: a point comment on a line typed
 // right after a table with no blank line in between (e.g. "test2" in the
-// user's actual note). Obsidian's two views disagree on whether that line is
-// part of the table — verified against @lezer/markdown's GFM extension (Live
-// Preview: yes, absorbed as a row) and an actual Obsidian screenshot (Reading
-// View: no, it renders as a separate line) — so both must work from the one
-// stored selector.
+// user's actual note). Obsidian ends the table before that line, in both
+// views, so the comment is ordinary text and decorates normally.
 describe('a point comment on a line right after a table, no blank line between', () => {
 	const BODY2 = [
 		'| # | Step | Instructions |',
@@ -123,42 +120,43 @@ describe('a point comment on a line right after a table, no blank line between',
 	it('resolves to the position right after "continued note"', () => {
 		const result = resolveSelector(BODY2, SELECTOR);
 		expect(result.status).toBe('matched');
+		if (result.status !== 'matched') return;
+		expect(BODY2.slice(0, result.start).endsWith('continued note')).toBe(true);
 	});
 
-	// A highlight covering the middle of the absorbed line is unambiguously
-	// "inside" the widened (lazy) table range for the Live Preview skip-check.
-	it('Live Preview: a highlight inside the absorbed line falls inside the widened table range', () => {
-		const from = BODY2.indexOf('continued note') + 2;
-		const to = from + 4;
-		expect(overlapsAny(tableRanges(BODY2), from, to)).toBe(true);
-	});
-
-	// The real annotation is a POINT sitting exactly at the trailing edge of
-	// the absorbed line (right after "continued note", before the newline) —
-	// which is also exactly where the lazy table range's `end` falls.
-	// overlapsAny's documented convention excludes a point sitting ON a
-	// range's boundary, so this is currently NOT treated as "inside" for the
-	// skip-check. Whether Obsidian's actual widget-replace decoration also
-	// renders a marker at that exact edge normally, or swallows it the same
-	// as anything strictly inside, is a CodeMirror boundary behavior this
-	// static test cannot confirm — it needs verifying against a real Live
-	// Preview render. Documented here rather than asserted either way.
-	it('resolves to a point exactly at the lazy table range\'s end boundary (open question, not asserted)', () => {
+	it('is outside the table, so Live Preview does not skip it', () => {
 		const result = resolveSelector(BODY2, SELECTOR);
 		if (result.status !== 'matched') throw new Error('expected a match');
 		const [range] = tableRanges(BODY2);
-		expect(result.start).toBe(range?.end);
+		expect(result.start).toBeGreaterThan(range?.end ?? Infinity);
+		expect(overlapsAny(tableRanges(BODY2), result.start, result.end)).toBe(false);
 	});
 
-	it("Reading View: the strict grid still has a separate, correctly-shaped table ending before \"continued note\", for a real Reading View <table> with 2 rows to match", () => {
+	it('leaves the table itself with just its header and one row', () => {
 		const grids = tableGrids(BODY2);
-		const strict = grids.find((g) => g.rows.length === 2);
-		expect(strict?.rows[1]?.map((c) => c.text)).toEqual(['5', 'Note the delta', 'Goes in the inventory.']);
+		expect(grids).toHaveLength(1);
+		expect(grids[0]?.rows[1]?.map((c) => c.text)).toEqual(['5', 'Note the delta', 'Goes in the inventory.']);
 	});
+});
 
-	it('the lazily-absorbed candidate places "continued note" in its own padded row, for a Live Preview unfocused-cell render that included it', () => {
-		const grids = tableGrids(BODY2);
-		const lazy = grids.find((g) => g.rows.length === 3);
-		expect(lazy?.rows[2]?.map((c) => c.text)).toEqual(['continued note', '', '']);
+// Reported case: comments at the end of a cell whose text carries inline
+// markdown. The rendered cell drops the markup, so the stored context never
+// matches it; the offset is instead mapped from source to rendered text.
+describe('a point comment at the end of a cell with inline markdown', () => {
+	const BODY3 = [
+		'| #   | Step | Instructions |',
+		'| --- | ---- | ------------ |',
+		'| 5   | Note | Set the **`Imp`** column here too — one letter, `P` / `B` / `R`.      |',
+	].join('\n');
+	const RENDERED = 'Set the Imp column here too — one letter, P / B / R.';
+
+	it('lands at the end of the rendered cell text', () => {
+		const point = BODY3.indexOf('R`.') + 3;
+		const grid = tableGrids(BODY3)[0]!;
+		const local = placeInCell(grid, 1, 2, point, point);
+		expect(local).not.toBeNull();
+		const cell = grid.rows[1]![2]!;
+		const map = sourceToRenderedOffsets(BODY3.slice(cell.start, cell.end), RENDERED)!;
+		expect(map(local!.start)).toBe(RENDERED.length);
 	});
 });

@@ -14,8 +14,8 @@ import type { MarkdownPostProcessorContext, MarkdownSectionInformation } from 'o
 import { MarkdownRenderChild, setIcon } from 'obsidian';
 
 import { captureSelector, resolveSelector } from '../core/matcher';
-import type { TextRange } from '../core/tables';
-import { matchTableGrid, tableGrids } from '../core/tables';
+import type { TableGrid, TextRange } from '../core/tables';
+import { matchTableGrid, placeInCell, sourceToRenderedOffsets, tableGrids } from '../core/tables';
 import { numberComments } from '../core/ordering';
 import type { MdAnnotationSettings } from '../core/settings';
 import {
@@ -387,38 +387,93 @@ function inSection(
 	return outcome.start < range.end && outcome.end > range.start;
 }
 
-// The [start, end) span, in the note body, of the table cell this element
-// renders — or null when it cannot be pinned down with certainty.
-//
-// Obsidian renders each unfocused Live Preview table cell through this same
-// post-processor, but a cell is not a top-level block so it gets no section
-// info: there is nothing to say where in the note it came from. The rendered
-// table's own structure supplies that. Match its grid back to a table parsed
-// from the body, then read off this cell's row and column.
-//
-// Everything here returns null rather than guessing. Without a definite span
-// the caller falls back to skipping the element, which is the safe outcome —
-// matching the note's whole annotation set against one cell's few words is how
-// unrelated annotations end up drawn inside a table.
-export function cellBodyRange(el: HTMLElement, body: string): TextRange | null {
-	// Queried per tag rather than as a 'td, th' selector list, which infers only
-	// as the base Element type.
-	const cell = el.closest('td') ?? el.closest('th');
-	const row = cell?.closest('tr') ?? null;
-	const table = cell?.closest('table') ?? null;
-	if (!cell || !row || !table) return null;
-	if (typeof cell.cellIndex !== 'number' || typeof row.rowIndex !== 'number') return null;
+// What one annotation needs in order to be drawn into a rendered element: the
+// annotation, and — when its exact spot in the element's rendered text is
+// already known — that offset pair. With `at` null the matcher finds it.
+interface DrawItem {
+	annotation: Annotation;
+	at: TextRange | null;
+}
 
-	const rendered = Array.from(table.rows).map((r) =>
-		Array.from(r.cells).map((c) => (c.textContent ?? '').trim()),
-	);
-	const grid = matchTableGrid(tableGrids(body), rendered);
-	const match = grid?.rows[row.rowIndex]?.[cell.cellIndex];
-	return match ? { start: match.start, end: match.end } : null;
+// Draw `items` into `child`'s element: markers for point comments, wrap spans
+// for ranges, honouring every visibility setting. Shared by the Reading-view
+// post-processor and the Live Preview table-cell painter.
+function drawAnnotations(
+	child: HighlightRenderChild,
+	items: ReadonlyArray<DrawItem>,
+	host: ReadingHost,
+	path: string,
+	state: FileAnnotationState,
+): void {
+	const settings = host.settings;
+	const commentNumbers = numberComments(state.annotations, state.outcomes);
+	// Whether this annotation's card is wanted in the gutter. When it is,
+	// something carrying its id has to end up in the rendered note even if the
+	// annotation itself is not being drawn — otherwise the gutter has nothing
+	// to align the card to.
+	const gutterWants = (annotation: Annotation): boolean =>
+		annotation.type === 'comment' ? settings.gutterCommentsEnabled : settings.gutterAnnotationsEnabled;
+
+	for (const { annotation, at } of items) {
+		const outcome = state.outcomes.get(annotation.id);
+		if (outcome?.status !== 'matched') continue;
+		// Re-capture from the body at the RESOLVED position so the quote and
+		// context reflect the current text, then match that against this
+		// element's rendered text.
+		const selector = captureSelector(state.body, outcome.start, outcome.end);
+		const reveal = (): void => host.revealAnnotation(path, annotation.id);
+		if (outcome.start === outcome.end) {
+			// Point comment marker.
+			if (annotation.type !== 'comment') continue;
+			if (settings.commentsHiddenEnabled) {
+				if (gutterWants(annotation)) child.tryAnchor(selector, annotation.id, at);
+				continue;
+			}
+			const styled = settings.commentsFormattingEnabled;
+			const number = commentNumbers.get(annotation.id);
+			child.tryMarker(
+				selector,
+				markerClasses() + (styled ? '' : ' mdann-marker-plain'),
+				styled ? highlightStyleVars(annotation.type, annotation.category, settings) : {},
+				annotation.id,
+				number !== undefined ? String(number) : '',
+				reveal,
+				at,
+			);
+			continue;
+		}
+		const styled =
+			annotation.type === 'highlight'
+				? settings.annotationFormattingEnabled
+				: settings.commentsFormattingEnabled;
+		if (!styled) {
+			// Formatting is off for this type: wrap the text in an unstyled span
+			// so the gutter (and a click-to-sidebar) still has a handle on it,
+			// or skip it entirely when neither is wanted.
+			if (!gutterWants(annotation)) continue;
+			child.tryWrap(selector, `${HIGHLIGHT_CLASS} ${ANCHOR_CLASS}`, {}, annotation.id, reveal, at);
+			continue;
+		}
+		child.tryWrap(
+			selector,
+			`${highlightClasses(annotation.type, annotation.category, settings)} mdann-hl-clickable`,
+			highlightStyleVars(annotation.type, annotation.category, settings),
+			annotation.id,
+			reveal,
+			at,
+		);
+	}
 }
 
 export function createReadingPostProcessor(host: ReadingHost) {
 	return async (el: HTMLElement, ctx: MarkdownPostProcessorContext): Promise<void> => {
+		// A Live Preview table cell also renders through this post-processor,
+		// but only when Obsidian (re)builds the table — not when an annotation
+		// is added or changed — and with no section info to say where it came
+		// from. Those cells are painted by paintLivePreviewTables instead, which
+		// runs on every decoration pass and knows exactly which table it is in.
+		if (el.closest('td, th') && ctx.getSectionInfo(el) === null) return;
+
 		const state = await host.ensureFileState(ctx.sourcePath);
 		if (!state || state.annotations.length === 0) return;
 
@@ -429,109 +484,122 @@ export function createReadingPostProcessor(host: ReadingHost) {
 
 		const section = ctx.getSectionInfo(el);
 		const range = section ? sectionRange(section) : null;
-		// A Live Preview table cell renders through this post-processor but is
-		// not a top-level block, so it gets no section info. Its span in the note
-		// comes from the table's structure instead; only annotations resolved
-		// inside that one cell may be drawn here. Without a definite span there
-		// is nothing safe to draw — matching the note's whole annotation set
-		// against a few words of cell text is how unrelated annotations end up
-		// stacked in a table.
-		const cellRange = range ? null : cellBodyRange(el, state.body);
-		const scope = range ?? cellRange;
-		if (scope) {
+		if (range) {
 			candidates = candidates.filter((a) => {
 				const outcome = state.outcomes.get(a.id);
-				return outcome?.status === 'matched' && inSection(outcome, scope);
+				return outcome?.status === 'matched' && inSection(outcome, range);
 			});
 			if (candidates.length === 0) return;
-		} else if (el.closest('td, th')) {
-			return;
 		}
 
-		const settings = host.settings;
-		const commentNumbers = numberComments(state.annotations, state.outcomes);
 		const child = new HighlightRenderChild(el);
-		// Whether this annotation's card is wanted in the Reading-view gutter.
-		// When it is, something carrying its id has to end up in the rendered
-		// note even if the annotation itself is not being drawn — otherwise the
-		// gutter has nothing to align the card to.
-		const gutterWants = (annotation: Annotation): boolean =>
-			annotation.type === 'comment'
-				? settings.gutterCommentsEnabled
-				: settings.gutterAnnotationsEnabled;
-
-		// Inside a table cell the selector's stored context is the raw row —
-		// pipes, padding and all — which appears nowhere in the cell's rendered
-		// text, so the matcher has little to anchor a point comment to. The
-		// cell's exact span is already known, though, so when its source text
-		// survives rendering unchanged (no inline markdown) the offset can be
-		// used directly. Otherwise `at` stays null and the matcher decides, as
-		// everywhere else.
-		const cellText = cellRange ? state.body.slice(cellRange.start, cellRange.end) : null;
-		const exactCell = cellRange !== null && cellText === child.renderedText();
-		const offsetIn = (outcome: { start: number; end: number }): TextRange | null =>
-			exactCell && cellRange
-				? { start: outcome.start - cellRange.start, end: outcome.end - cellRange.start }
-				: null;
-
-		for (const annotation of candidates) {
-			const outcome = state.outcomes.get(annotation.id);
-			if (outcome?.status !== 'matched') continue;
-			// Re-capture from the body at the RESOLVED position so the quote
-			// and context reflect the current text, then match that against
-			// this block's rendered text.
-			const selector = captureSelector(state.body, outcome.start, outcome.end);
-			const at = offsetIn(outcome);
-			if (outcome.start === outcome.end) {
-				// Point comment marker.
-				if (annotation.type !== 'comment') continue;
-				if (settings.commentsHiddenEnabled) {
-					if (gutterWants(annotation)) child.tryAnchor(selector, annotation.id, at);
-					continue;
-				}
-				const styled = settings.commentsFormattingEnabled;
-				const number = commentNumbers.get(annotation.id);
-				child.tryMarker(
-					selector,
-					markerClasses() + (styled ? '' : ' mdann-marker-plain'),
-					styled ? highlightStyleVars(annotation.type, annotation.category, settings) : {},
-					annotation.id,
-					number !== undefined ? String(number) : '',
-					() => host.revealAnnotation(ctx.sourcePath, annotation.id),
-					at,
-				);
-				continue;
-			}
-			const styled =
-				annotation.type === 'highlight'
-					? settings.annotationFormattingEnabled
-					: settings.commentsFormattingEnabled;
-			if (!styled) {
-				// Formatting is off for this type: wrap the text in an unstyled
-				// span so the gutter (and a click-to-sidebar) still has a
-				// handle on it, or skip it entirely when neither is wanted.
-				if (!gutterWants(annotation)) continue;
-				child.tryWrap(
-					selector,
-					`${HIGHLIGHT_CLASS} ${ANCHOR_CLASS}`,
-					{},
-					annotation.id,
-					() => host.revealAnnotation(ctx.sourcePath, annotation.id),
-					at,
-				);
-				continue;
-			}
-			child.tryWrap(
-				selector,
-				`${highlightClasses(annotation.type, annotation.category, settings)} mdann-hl-clickable`,
-				highlightStyleVars(annotation.type, annotation.category, settings),
-				annotation.id,
-				() => host.revealAnnotation(ctx.sourcePath, annotation.id),
-				at,
-			);
-		}
+		drawAnnotations(
+			child,
+			candidates.map((annotation) => ({ annotation, at: null })),
+			host,
+			ctx.sourcePath,
+			state,
+		);
 		if (child.spanCount > 0) ctx.addChild(child);
 		// Whatever was rendered here, the gutter's measurements are now stale.
 		host.onReadingRendered(ctx.sourcePath);
 	};
+}
+
+// ── Live Preview tables ───────────────────────────────────────────────────
+//
+// In Live Preview Obsidian replaces each table with a block widget
+// (.cm-table-widget), and a CodeMirror decoration inside it is never shown.
+// So its cells are painted directly, the same way the Reading view is.
+//
+// Each cell's content sits in a .table-cell-wrapper div. Which table a widget
+// is comes from its document position (posAtDOM), and which cell from the
+// <tr>/<td> indices — both exact, so nothing is inferred from cell text.
+// A wrapper is repainted only when the decoration generation has moved on
+// since it was last painted, so this is cheap to call after every redraw.
+
+const tablePaints = new WeakMap<HTMLElement, { child: HighlightRenderChild; generation: number }>();
+
+// Returns true when anything was (re)painted, so the caller knows the gutter's
+// measurements are stale.
+export function paintLivePreviewTables(
+	root: HTMLElement,
+	positionOf: (el: HTMLElement) => number | null,
+	host: ReadingHost,
+	path: string,
+	state: FileAnnotationState,
+	generation: number,
+): boolean {
+	const widgets = Array.from(root.querySelectorAll<HTMLElement>('.cm-table-widget'));
+	if (widgets.length === 0) return false;
+	let grids: TableGrid[] | null = null;
+	let changed = false;
+
+	for (const widget of widgets) {
+		const table = widget.querySelector('table');
+		if (!table) continue;
+		const wrappers: Array<{ wrapper: HTMLElement; row: number; col: number }> = [];
+		for (const tr of Array.from(table.rows)) {
+			for (const td of Array.from(tr.cells)) {
+				for (const wrapper of Array.from(td.children)) {
+					if (!wrapper.instanceOf(HTMLElement) || !wrapper.hasClass('table-cell-wrapper')) continue;
+					// The wrapper holding a focused cell's nested editor.
+					if (wrapper.querySelector('.cm-editor')) continue;
+					if (tablePaints.get(wrapper)?.generation === generation) continue;
+					wrappers.push({ wrapper, row: tr.rowIndex, col: td.cellIndex });
+				}
+			}
+		}
+		if (wrappers.length === 0) continue;
+
+		grids ??= tableGrids(state.body);
+		// The widget starts at its header line, so its position names the table
+		// exactly. Should that ever be off (a table nested in a callout or list
+		// line), take the table containing the position, and failing that the
+		// one whose rendered shape and text match uniquely.
+		const start = positionOf(widget);
+		const rendered = Array.from(table.rows).map((r) =>
+			Array.from(r.cells).map((c) => (c.textContent ?? '').trim()),
+		);
+		const grid =
+			grids.find((g) => g.start === start) ??
+			grids.find((g) => start !== null && start >= g.start && start <= g.end) ??
+			matchTableGrid(grids, rendered);
+
+		for (const { wrapper, row, col } of wrappers) {
+			const previous = tablePaints.get(wrapper);
+			if (previous) {
+				previous.child.unload();
+				changed = true;
+			}
+			const child = new HighlightRenderChild(wrapper);
+			// Loaded up front, so the unload before the next repaint always runs
+			// its teardown — including for a cell that got nothing this time.
+			child.load();
+			tablePaints.set(wrapper, { child, generation });
+			if (!grid) continue;
+			const cell = grid.rows[row]?.[col];
+			if (!cell) continue;
+
+			const source = state.body.slice(cell.start, cell.end);
+			const rendered = child.renderedText();
+			const toRendered =
+				source === rendered ? (offset: number) => offset : sourceToRenderedOffsets(source, rendered);
+			const items: DrawItem[] = [];
+			for (const annotation of state.annotations) {
+				const outcome = state.outcomes.get(annotation.id);
+				if (outcome?.status !== 'matched') continue;
+				const local = placeInCell(grid, row, col, outcome.start, outcome.end);
+				if (!local) continue;
+				items.push({
+					annotation,
+					at: toRendered ? { start: toRendered(local.start), end: toRendered(local.end) } : null,
+				});
+			}
+			if (items.length === 0) continue;
+			drawAnnotations(child, items, host, path, state);
+			if (child.spanCount > 0) changed = true;
+		}
+	}
+	return changed;
 }

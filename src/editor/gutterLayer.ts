@@ -207,7 +207,7 @@ export class EditorGutter {
 		const items: Placement[] = [];
 		for (const [id, card] of this.cards.cards) {
 			const anchor = this.anchors.get(id);
-			const coords = anchor === undefined ? null : anchorCoords(view, anchor);
+			const coords = anchor === undefined ? null : anchorCoords(view, id, anchor);
 			if (!coords) {
 				items.push({ id, side: card.side, anchorY: null, height: 0 });
 				continue;
@@ -256,7 +256,17 @@ export class EditorGutter {
 }
 
 // Coordinates for an anchor, or null when its line is not currently rendered.
-function anchorCoords(view: EditorView, pos: number): { top: number } | null {
+//
+// Inside a Live Preview table the position is covered by Obsidian's table
+// widget, so CodeMirror can only report the widget's edge. The marker or span
+// painted into the cell (see paintLivePreviewTables) sits on the actual row,
+// so it is measured instead whenever one exists.
+function anchorCoords(view: EditorView, id: string, pos: number): { top: number } | null {
+	const painted = view.contentDOM.querySelector(`.cm-table-widget [data-mdann-id="${CSS.escape(id)}"]`);
+	if (painted) {
+		const rect = painted.getBoundingClientRect();
+		if (rect.height > 0 || rect.width > 0) return { top: rect.top };
+	}
 	for (const range of view.visibleRanges) {
 		if (pos >= range.from && pos <= range.to) return view.coordsAtPos(pos);
 	}

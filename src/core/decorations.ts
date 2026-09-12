@@ -47,10 +47,15 @@ export function selectDecorationRanges(
 		// whose editor holds only that one cell's text.
 		if (from === to && outcome.start !== outcome.end) continue;
 		// In Live Preview the table is a block widget, so a decoration inside it
-		// would never be displayed; the markdown post-processor draws those
-		// annotations instead (see editor/readingView.ts). The annotation is
+		// would never be displayed; paintLivePreviewTables draws those annotations
+		// into the cells instead (see editor/readingView.ts). The annotation is
 		// unaffected either way — it stays editable from the sidebar.
-		if (overlapsAny(tables, from, to)) continue;
+		// A point on the table's very edge counts too: the widget covers the
+		// whole [start, end] line span, and the painter places such a point in
+		// the nearest cell of its row (see placeInCell).
+		if (from === to ? tables.some((t) => from >= t.start && from <= t.end) : overlapsAny(tables, from, to)) {
+			continue;
+		}
 		if (from === to) {
 			// Point comment marker.
 			if (annotation.type !== 'comment' || settings.commentsHiddenEnabled) continue;

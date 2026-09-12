@@ -1439,7 +1439,7 @@ var EditorGutter = class {
     const items = [];
     for (const [id, card] of this.cards.cards) {
       const anchor = this.anchors.get(id);
-      const coords = anchor === void 0 ? null : anchorCoords(view, anchor);
+      const coords = anchor === void 0 ? null : anchorCoords(view, id, anchor);
       if (!coords) {
         items.push({ id, side: card.side, anchorY: null, height: 0 });
         continue;
@@ -1480,7 +1480,12 @@ var EditorGutter = class {
     this.cards.place(m.items);
   }
 };
-function anchorCoords(view, pos) {
+function anchorCoords(view, id, pos) {
+  const painted = view.contentDOM.querySelector(`.cm-table-widget [data-mdann-id="${CSS.escape(id)}"]`);
+  if (painted) {
+    const rect = painted.getBoundingClientRect();
+    if (rect.height > 0 || rect.width > 0) return { top: rect.top };
+  }
   for (const range of view.visibleRanges) {
     if (pos >= range.from && pos <= range.to) return view.coordsAtPos(pos);
   }
@@ -1494,27 +1499,16 @@ var import_obsidian = require("obsidian");
 
 // src/core/tables.ts
 var DELIMITER_ROW = /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?\s*$/;
+var PIPED_ROW = /^\|/;
+var UNPIPED_ROW = /^\s*[^|].*\|/;
 function looksLikeTableRow(line) {
   return line.includes("|");
 }
 function isDelimiterRow(line) {
   return line.includes("-") && DELIMITER_ROW.test(line);
 }
-var HEADING_LINE = /^ {0,3}#{1,6}(?:[ \t]|$)/;
-var THEMATIC_BREAK_LINE = /^ {0,3}(?:(?:-[ \t]*){3,}|(?:_[ \t]*){3,}|(?:\*[ \t]*){3,})$/;
-var BLOCKQUOTE_LINE = /^ {0,3}>/;
-var LIST_LINE = /^ {0,3}(?:[-+*](?:[ \t]|$)|\d{1,9}[.)](?:[ \t]|$))/;
-var FENCE_LINE = /^ {0,3}(?:`{3,}|~{3,})/;
-function continuesTableLazily(line) {
-  if (line.trim() === "") return false;
-  return !HEADING_LINE.test(line) && !THEMATIC_BREAK_LINE.test(line) && !BLOCKQUOTE_LINE.test(line) && !LIST_LINE.test(line) && !FENCE_LINE.test(line);
-}
-function normalizeRowLength(cells, columnCount, lineEnd) {
-  if (cells.length === columnCount) return cells;
-  if (cells.length > columnCount) return cells.slice(0, columnCount);
-  const padded = cells.slice();
-  while (padded.length < columnCount) padded.push({ text: "", start: lineEnd, end: lineEnd });
-  return padded;
+function rowRuleFor(header) {
+  return header.startsWith("|") ? PIPED_ROW : UNPIPED_ROW;
 }
 function splitRow(line, lineStart) {
   var _a;
@@ -1544,8 +1538,8 @@ function splitRow(line, lineStart) {
   if (cells.length > 0 && (last == null ? void 0 : last.text) === "" && line.trimEnd().endsWith("|")) cells.pop();
   return cells;
 }
-function parseTableGrids(text, continues, lazy) {
-  var _a, _b, _c, _d;
+function tableGrids(text) {
+  var _a, _b, _c;
   const lines = text.split("\n");
   const lineStarts = [];
   let offset = 0;
@@ -1559,26 +1553,30 @@ function parseTableGrids(text, continues, lazy) {
     const header = lines[i];
     const delimiter = lines[i + 1];
     if (header !== void 0 && delimiter !== void 0 && looksLikeTableRow(header) && isDelimiterRow(delimiter)) {
-      const columnCount = splitRow(header, (_a = lineStarts[i]) != null ? _a : 0).length;
+      const rule = rowRuleFor(header);
       const rowLines = [i];
       let endLine = i + 1;
       let j = i + 2;
       while (j < lines.length) {
         const row = lines[j];
-        if (row === void 0 || !continues(row)) break;
+        if (row === void 0 || !rule.test(row)) break;
         rowLines.push(j);
         endLine = j;
         j++;
       }
       grids.push({
-        start: (_b = lineStarts[i]) != null ? _b : 0,
-        end: ((_c = lineStarts[endLine]) != null ? _c : 0) + ((_d = lines[endLine]) != null ? _d : "").length,
+        start: (_a = lineStarts[i]) != null ? _a : 0,
+        end: ((_b = lineStarts[endLine]) != null ? _b : 0) + ((_c = lines[endLine]) != null ? _c : "").length,
         rows: rowLines.map((ln) => {
           var _a2, _b2;
-          const lineText = (_a2 = lines[ln]) != null ? _a2 : "";
-          const lineStart = (_b2 = lineStarts[ln]) != null ? _b2 : 0;
-          const cells = splitRow(lineText, lineStart);
-          return lazy ? normalizeRowLength(cells, columnCount, lineStart + lineText.length) : cells;
+          return splitRow((_a2 = lines[ln]) != null ? _a2 : "", (_b2 = lineStarts[ln]) != null ? _b2 : 0);
+        }),
+        rowLines: rowLines.map((ln) => {
+          var _a2, _b2, _c2;
+          return {
+            start: (_a2 = lineStarts[ln]) != null ? _a2 : 0,
+            end: ((_b2 = lineStarts[ln]) != null ? _b2 : 0) + ((_c2 = lines[ln]) != null ? _c2 : "").length
+          };
         })
       });
       i = j;
@@ -1588,25 +1586,8 @@ function parseTableGrids(text, continues, lazy) {
   }
   return grids;
 }
-function tableGrids(text) {
-  const strict = parseTableGrids(text, looksLikeTableRow, false);
-  const lazy = parseTableGrids(text, continuesTableLazily, true);
-  const lazyByStart = new Map(lazy.map((g) => [g.start, g]));
-  const grids = [];
-  for (const s of strict) {
-    grids.push(s);
-    const l = lazyByStart.get(s.start);
-    if (l && l.rows.length !== s.rows.length) grids.push(l);
-  }
-  return grids;
-}
 function tableRanges(text) {
-  const byStart = /* @__PURE__ */ new Map();
-  for (const grid of tableGrids(text)) {
-    const existing = byStart.get(grid.start);
-    if (!existing || grid.end > existing.end) byStart.set(grid.start, { start: grid.start, end: grid.end });
-  }
-  return [...byStart.values()];
+  return tableGrids(text).map((g) => ({ start: g.start, end: g.end }));
 }
 function overlapsAny(ranges, from, to) {
   return ranges.some((r) => from < r.end && to > r.start);
@@ -1629,6 +1610,41 @@ function matchTableGrid(grids, rendered) {
   );
   return sameText.length === 1 ? (_b = sameText[0]) != null ? _b : null : null;
 }
+function placeInCell(grid, row, col, from, to) {
+  var _a, _b;
+  const cells = grid.rows[row];
+  const cell = cells == null ? void 0 : cells[col];
+  const line = grid.rowLines[row];
+  if (!cells || !cell || !line) return null;
+  if (from === to) {
+    if (from < line.start || from > line.end) return null;
+    let owner = 0;
+    for (let c = 0; c < cells.length; c++) {
+      if (((_b = (_a = cells[c]) == null ? void 0 : _a.start) != null ? _b : Infinity) <= from) owner = c;
+    }
+    if (owner !== col) return null;
+    const at = Math.max(cell.start, Math.min(from, cell.end)) - cell.start;
+    return { start: at, end: at };
+  }
+  const start = Math.max(from, cell.start);
+  const end = Math.min(to, cell.end);
+  if (start >= end) return null;
+  return { start: start - cell.start, end: end - cell.start };
+}
+function sourceToRenderedOffsets(source, rendered) {
+  const before = new Array(source.length + 1);
+  let j = 0;
+  for (let i = 0; i < source.length; i++) {
+    before[i] = j;
+    if (j < rendered.length && source[i] === rendered[j]) j++;
+  }
+  before[source.length] = j;
+  if (j !== rendered.length) return null;
+  return (offset) => {
+    var _a;
+    return (_a = before[Math.max(0, Math.min(offset, source.length))]) != null ? _a : j;
+  };
+}
 
 // src/core/decorations.ts
 function selectDecorationRanges(docLength, body, annotations, outcomes, settings, skipTables) {
@@ -1641,7 +1657,9 @@ function selectDecorationRanges(docLength, body, annotations, outcomes, settings
     const to = Math.min(outcome.end, docLength);
     if (from > to) continue;
     if (from === to && outcome.start !== outcome.end) continue;
-    if (overlapsAny(tables, from, to)) continue;
+    if (from === to ? tables.some((t) => from >= t.start && from <= t.end) : overlapsAny(tables, from, to)) {
+      continue;
+    }
     if (from === to) {
       if (annotation.type !== "comment" || settings.commentsHiddenEnabled) continue;
       ranges.push({ from, to, annotation });
@@ -1713,10 +1731,22 @@ function buildEditorExtension(host) {
     class {
       constructor(view) {
         this.view = view;
+        this.frame = null;
+        var _a;
+        const win = (_a = view.dom.ownerDocument.defaultView) != null ? _a : window;
+        this.tableObserver = new win.MutationObserver((mutations) => {
+          if (this.frame !== null || !mutations.some(addsTable)) return;
+          this.frame = win.requestAnimationFrame(() => {
+            this.frame = null;
+            if (!isEmbeddedEditorView(this.view)) host.onEditorRedrawn(this.view);
+          });
+        });
+        this.tableObserver.observe(view.contentDOM, { childList: true, subtree: true });
       }
       docViewUpdate(view) {
         if (isEmbeddedEditorView(view)) return;
         paintWidgetHighlights(view);
+        host.onEditorRedrawn(view);
       }
       // Belt and braces: docViewUpdate is a relatively recent addition to
       // @codemirror/view, and the copy Obsidian bundles is not ours to
@@ -1727,14 +1757,28 @@ function buildEditorExtension(host) {
       update(update) {
         const view = update.view;
         if (isEmbeddedEditorView(view)) return;
-        view.requestMeasure({ read: () => null, write: () => paintWidgetHighlights(view) });
+        view.requestMeasure({
+          read: () => null,
+          write: () => {
+            paintWidgetHighlights(view);
+            host.onEditorRedrawn(view);
+          }
+        });
       }
       destroy() {
+        var _a;
+        this.tableObserver.disconnect();
+        if (this.frame !== null) ((_a = this.view.dom.ownerDocument.defaultView) != null ? _a : window).cancelAnimationFrame(this.frame);
         clearWidgetHighlights(this.view);
       }
     }
   );
   return [annotationDecoField, watcher, clickReveal, widgetPainter];
+}
+function addsTable(mutation) {
+  return Array.from(mutation.addedNodes).some(
+    (node) => node.instanceOf(HTMLElement) && (node.tagName === "TABLE" || node.querySelector("table") !== null)
+  );
 }
 var WIDGET_STYLE_PROPS = [
   "--mdann-light-fg",
@@ -2367,25 +2411,53 @@ function inSection(outcome, range) {
   }
   return outcome.start < range.end && outcome.end > range.start;
 }
-function cellBodyRange(el, body) {
-  var _a, _b, _c, _d;
-  const cell = (_a = el.closest("td")) != null ? _a : el.closest("th");
-  const row = (_b = cell == null ? void 0 : cell.closest("tr")) != null ? _b : null;
-  const table = (_c = cell == null ? void 0 : cell.closest("table")) != null ? _c : null;
-  if (!cell || !row || !table) return null;
-  if (typeof cell.cellIndex !== "number" || typeof row.rowIndex !== "number") return null;
-  const rendered = Array.from(table.rows).map(
-    (r) => Array.from(r.cells).map((c) => {
-      var _a2;
-      return ((_a2 = c.textContent) != null ? _a2 : "").trim();
-    })
-  );
-  const grid = matchTableGrid(tableGrids(body), rendered);
-  const match = (_d = grid == null ? void 0 : grid.rows[row.rowIndex]) == null ? void 0 : _d[cell.cellIndex];
-  return match ? { start: match.start, end: match.end } : null;
+function drawAnnotations(child, items, host, path, state) {
+  const settings = host.settings;
+  const commentNumbers = numberComments(state.annotations, state.outcomes);
+  const gutterWants = (annotation) => annotation.type === "comment" ? settings.gutterCommentsEnabled : settings.gutterAnnotationsEnabled;
+  for (const { annotation, at } of items) {
+    const outcome = state.outcomes.get(annotation.id);
+    if ((outcome == null ? void 0 : outcome.status) !== "matched") continue;
+    const selector = captureSelector(state.body, outcome.start, outcome.end);
+    const reveal = () => host.revealAnnotation(path, annotation.id);
+    if (outcome.start === outcome.end) {
+      if (annotation.type !== "comment") continue;
+      if (settings.commentsHiddenEnabled) {
+        if (gutterWants(annotation)) child.tryAnchor(selector, annotation.id, at);
+        continue;
+      }
+      const styled2 = settings.commentsFormattingEnabled;
+      const number = commentNumbers.get(annotation.id);
+      child.tryMarker(
+        selector,
+        markerClasses() + (styled2 ? "" : " mdann-marker-plain"),
+        styled2 ? highlightStyleVars(annotation.type, annotation.category, settings) : {},
+        annotation.id,
+        number !== void 0 ? String(number) : "",
+        reveal,
+        at
+      );
+      continue;
+    }
+    const styled = annotation.type === "highlight" ? settings.annotationFormattingEnabled : settings.commentsFormattingEnabled;
+    if (!styled) {
+      if (!gutterWants(annotation)) continue;
+      child.tryWrap(selector, `${HIGHLIGHT_CLASS} ${ANCHOR_CLASS}`, {}, annotation.id, reveal, at);
+      continue;
+    }
+    child.tryWrap(
+      selector,
+      `${highlightClasses(annotation.type, annotation.category, settings)} mdann-hl-clickable`,
+      highlightStyleVars(annotation.type, annotation.category, settings),
+      annotation.id,
+      reveal,
+      at
+    );
+  }
 }
 function createReadingPostProcessor(host) {
   return async (el, ctx) => {
+    if (el.closest("td, th") && ctx.getSectionInfo(el) === null) return;
     const state = await host.ensureFileState(ctx.sourcePath);
     if (!state || state.annotations.length === 0) return;
     let candidates = state.annotations.filter(
@@ -2397,73 +2469,88 @@ function createReadingPostProcessor(host) {
     if (candidates.length === 0) return;
     const section = ctx.getSectionInfo(el);
     const range = section ? sectionRange(section) : null;
-    const cellRange = range ? null : cellBodyRange(el, state.body);
-    const scope = range != null ? range : cellRange;
-    if (scope) {
+    if (range) {
       candidates = candidates.filter((a) => {
         const outcome = state.outcomes.get(a.id);
-        return (outcome == null ? void 0 : outcome.status) === "matched" && inSection(outcome, scope);
+        return (outcome == null ? void 0 : outcome.status) === "matched" && inSection(outcome, range);
       });
       if (candidates.length === 0) return;
-    } else if (el.closest("td, th")) {
-      return;
     }
-    const settings = host.settings;
-    const commentNumbers = numberComments(state.annotations, state.outcomes);
     const child = new HighlightRenderChild(el);
-    const gutterWants = (annotation) => annotation.type === "comment" ? settings.gutterCommentsEnabled : settings.gutterAnnotationsEnabled;
-    const cellText = cellRange ? state.body.slice(cellRange.start, cellRange.end) : null;
-    const exactCell = cellRange !== null && cellText === child.renderedText();
-    const offsetIn = (outcome) => exactCell && cellRange ? { start: outcome.start - cellRange.start, end: outcome.end - cellRange.start } : null;
-    for (const annotation of candidates) {
-      const outcome = state.outcomes.get(annotation.id);
-      if ((outcome == null ? void 0 : outcome.status) !== "matched") continue;
-      const selector = captureSelector(state.body, outcome.start, outcome.end);
-      const at = offsetIn(outcome);
-      if (outcome.start === outcome.end) {
-        if (annotation.type !== "comment") continue;
-        if (settings.commentsHiddenEnabled) {
-          if (gutterWants(annotation)) child.tryAnchor(selector, annotation.id, at);
-          continue;
-        }
-        const styled2 = settings.commentsFormattingEnabled;
-        const number = commentNumbers.get(annotation.id);
-        child.tryMarker(
-          selector,
-          markerClasses() + (styled2 ? "" : " mdann-marker-plain"),
-          styled2 ? highlightStyleVars(annotation.type, annotation.category, settings) : {},
-          annotation.id,
-          number !== void 0 ? String(number) : "",
-          () => host.revealAnnotation(ctx.sourcePath, annotation.id),
-          at
-        );
-        continue;
-      }
-      const styled = annotation.type === "highlight" ? settings.annotationFormattingEnabled : settings.commentsFormattingEnabled;
-      if (!styled) {
-        if (!gutterWants(annotation)) continue;
-        child.tryWrap(
-          selector,
-          `${HIGHLIGHT_CLASS} ${ANCHOR_CLASS}`,
-          {},
-          annotation.id,
-          () => host.revealAnnotation(ctx.sourcePath, annotation.id),
-          at
-        );
-        continue;
-      }
-      child.tryWrap(
-        selector,
-        `${highlightClasses(annotation.type, annotation.category, settings)} mdann-hl-clickable`,
-        highlightStyleVars(annotation.type, annotation.category, settings),
-        annotation.id,
-        () => host.revealAnnotation(ctx.sourcePath, annotation.id),
-        at
-      );
-    }
+    drawAnnotations(
+      child,
+      candidates.map((annotation) => ({ annotation, at: null })),
+      host,
+      ctx.sourcePath,
+      state
+    );
     if (child.spanCount > 0) ctx.addChild(child);
     host.onReadingRendered(ctx.sourcePath);
   };
+}
+var tablePaints = /* @__PURE__ */ new WeakMap();
+function paintLivePreviewTables(root, positionOf, host, path, state, generation) {
+  var _a, _b, _c, _d;
+  const widgets = Array.from(root.querySelectorAll(".cm-table-widget"));
+  if (widgets.length === 0) return false;
+  let grids = null;
+  let changed = false;
+  for (const widget of widgets) {
+    const table = widget.querySelector("table");
+    if (!table) continue;
+    const wrappers = [];
+    for (const tr of Array.from(table.rows)) {
+      for (const td of Array.from(tr.cells)) {
+        for (const wrapper of Array.from(td.children)) {
+          if (!wrapper.instanceOf(HTMLElement) || !wrapper.hasClass("table-cell-wrapper")) continue;
+          if (wrapper.querySelector(".cm-editor")) continue;
+          if (((_a = tablePaints.get(wrapper)) == null ? void 0 : _a.generation) === generation) continue;
+          wrappers.push({ wrapper, row: tr.rowIndex, col: td.cellIndex });
+        }
+      }
+    }
+    if (wrappers.length === 0) continue;
+    grids != null ? grids : grids = tableGrids(state.body);
+    const start = positionOf(widget);
+    const rendered = Array.from(table.rows).map(
+      (r) => Array.from(r.cells).map((c) => {
+        var _a2;
+        return ((_a2 = c.textContent) != null ? _a2 : "").trim();
+      })
+    );
+    const grid = (_c = (_b = grids.find((g) => g.start === start)) != null ? _b : grids.find((g) => start !== null && start >= g.start && start <= g.end)) != null ? _c : matchTableGrid(grids, rendered);
+    for (const { wrapper, row, col } of wrappers) {
+      const previous = tablePaints.get(wrapper);
+      if (previous) {
+        previous.child.unload();
+        changed = true;
+      }
+      const child = new HighlightRenderChild(wrapper);
+      child.load();
+      tablePaints.set(wrapper, { child, generation });
+      if (!grid) continue;
+      const cell = (_d = grid.rows[row]) == null ? void 0 : _d[col];
+      if (!cell) continue;
+      const source = state.body.slice(cell.start, cell.end);
+      const rendered2 = child.renderedText();
+      const toRendered = source === rendered2 ? (offset) => offset : sourceToRenderedOffsets(source, rendered2);
+      const items = [];
+      for (const annotation of state.annotations) {
+        const outcome = state.outcomes.get(annotation.id);
+        if ((outcome == null ? void 0 : outcome.status) !== "matched") continue;
+        const local = placeInCell(grid, row, col, outcome.start, outcome.end);
+        if (!local) continue;
+        items.push({
+          annotation,
+          at: toRendered ? { start: toRendered(local.start), end: toRendered(local.end) } : null
+        });
+      }
+      if (items.length === 0) continue;
+      drawAnnotations(child, items, host, path, state);
+      if (child.spanCount > 0) changed = true;
+    }
+  }
+  return changed;
 }
 
 // src/settingsTab.ts
@@ -3916,6 +4003,9 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
     // the preview DOM that Obsidian rebuilds on every re-render).
     this.readingGutters = /* @__PURE__ */ new Map();
     this.readingGutterTimer = null;
+    // Bumped by every decoration pass; a Live Preview table cell painted under
+    // an older value is repainted (see paintLivePreviewTables).
+    this.tablePaintGeneration = 0;
     this.editorTimers = /* @__PURE__ */ new Map();
     this.diskTimers = /* @__PURE__ */ new Map();
     // Orphan prompting state, per file path: which ids were already orphaned
@@ -4422,7 +4512,40 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
     applyEditorDecorations(view, state.body, state.annotations, state.outcomes, this.settings, (id) => {
       this.revealAnnotation(path, id);
     });
+    this.tablePaintGeneration++;
+    this.paintTables(view);
     (_a = this.gutters.get(view)) == null ? void 0 : _a.sync(path, state.annotations, state.outcomes, this.settings);
+  }
+  onEditorRedrawn(view) {
+    var _a;
+    if (this.paintTables(view)) (_a = this.gutters.get(view)) == null ? void 0 : _a.requestLayout();
+  }
+  // Paint annotations into the Live Preview table widgets of one editor.
+  // Skipped while the cached state describes a different text than the
+  // editor holds (an edit not yet re-resolved): its offsets would land in the
+  // wrong cells. The decoration pass that follows resolution repaints.
+  paintTables(view) {
+    var _a;
+    if (!((_a = view.dom.closest(".markdown-source-view")) == null ? void 0 : _a.classList.contains("is-live-preview"))) return false;
+    const path = editorViewPath(view);
+    if (path === null) return false;
+    const state = this.states.get(path);
+    if (!state || !view.contentDOM.querySelector(".cm-table-widget")) return false;
+    if (view.state.doc.sliceString(0, state.body.length) !== state.body) return false;
+    return paintLivePreviewTables(
+      view.contentDOM,
+      (el) => {
+        try {
+          return view.posAtDOM(el);
+        } catch (e) {
+          return null;
+        }
+      },
+      this,
+      path,
+      state,
+      this.tablePaintGeneration
+    );
   }
   decorateAllFor(path) {
     for (const view of this.editors) {

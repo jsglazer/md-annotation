@@ -144,4 +144,21 @@ describe('selectDecorationRanges', () => {
 		const ranges = selectDecorationRanges(BODY.length, BODY, annotations, outcomes, defaultSettings());
 		expect(ranges.map((r) => r.from)).toEqual([5, 18, 30]);
 	});
+
+	// A comment exactly on a Live Preview table's edge sits inside Obsidian's
+	// table widget, which would hide a CodeMirror marker there; the cell painter
+	// draws it instead. Right after the table, on the next line, it is ordinary.
+	it('skips a point on a table edge in Live Preview, but not one past it', () => {
+		const body = '| a |\n| - |\n| x |\nafter';
+		const tableEnd = body.indexOf('\nafter');
+		const outcomes = new Map<string, MatchResult>([
+			['edge', matched(tableEnd, tableEnd)],
+			['past', matched(body.length, body.length)],
+		]);
+		const annotations = [annotation('edge', 'comment'), annotation('past', 'comment')];
+		const live = selectDecorationRanges(body.length, body, annotations, outcomes, defaultSettings(), true);
+		expect(live.map((r) => r.annotation.id)).toEqual(['past']);
+		const source = selectDecorationRanges(body.length, body, annotations, outcomes, defaultSettings(), false);
+		expect(source.map((r) => r.annotation.id)).toEqual(['edge', 'past']);
+	});
 });
