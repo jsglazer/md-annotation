@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { resolveSelector } from '../src/core/matcher';
-import { tableGrids, matchTableGrid } from '../src/core/tables';
+import { tableGrids, tableRanges, matchTableGrid, overlapsAny } from '../src/core/tables';
 import type { TableCell } from '../src/core/tables';
 
 // The note body from the reported case, trimmed to what matters.
@@ -95,5 +95,70 @@ describe('annotation inside a table cell', () => {
 		const cellText = BODY.slice(cell.start, cell.end);
 		const pos = anchor - cell.start;
 		expect(cellText.slice(0, pos)).toBe('Highlight ');
+	});
+});
+
+// Reported case, reduced to what matters: a point comment on a line typed
+// right after a table with no blank line in between (e.g. "test2" in the
+// user's actual note). Obsidian's two views disagree on whether that line is
+// part of the table — verified against @lezer/markdown's GFM extension (Live
+// Preview: yes, absorbed as a row) and an actual Obsidian screenshot (Reading
+// View: no, it renders as a separate line) — so both must work from the one
+// stored selector.
+describe('a point comment on a line right after a table, no blank line between', () => {
+	const BODY2 = [
+		'| # | Step | Instructions |',
+		'| --- | --- | --- |',
+		'| 5 | Note the delta | Goes in the inventory. |',
+		'continued note',
+		'# Next section',
+	].join('\n');
+
+	const SELECTOR = {
+		exact: '',
+		prefix: 'entory.|\ncontinued note',
+		suffix: '\n# Next section',
+	};
+
+	it('resolves to the position right after "continued note"', () => {
+		const result = resolveSelector(BODY2, SELECTOR);
+		expect(result.status).toBe('matched');
+	});
+
+	// A highlight covering the middle of the absorbed line is unambiguously
+	// "inside" the widened (lazy) table range for the Live Preview skip-check.
+	it('Live Preview: a highlight inside the absorbed line falls inside the widened table range', () => {
+		const from = BODY2.indexOf('continued note') + 2;
+		const to = from + 4;
+		expect(overlapsAny(tableRanges(BODY2), from, to)).toBe(true);
+	});
+
+	// The real annotation is a POINT sitting exactly at the trailing edge of
+	// the absorbed line (right after "continued note", before the newline) —
+	// which is also exactly where the lazy table range's `end` falls.
+	// overlapsAny's documented convention excludes a point sitting ON a
+	// range's boundary, so this is currently NOT treated as "inside" for the
+	// skip-check. Whether Obsidian's actual widget-replace decoration also
+	// renders a marker at that exact edge normally, or swallows it the same
+	// as anything strictly inside, is a CodeMirror boundary behavior this
+	// static test cannot confirm — it needs verifying against a real Live
+	// Preview render. Documented here rather than asserted either way.
+	it('resolves to a point exactly at the lazy table range\'s end boundary (open question, not asserted)', () => {
+		const result = resolveSelector(BODY2, SELECTOR);
+		if (result.status !== 'matched') throw new Error('expected a match');
+		const [range] = tableRanges(BODY2);
+		expect(result.start).toBe(range?.end);
+	});
+
+	it("Reading View: the strict grid still has a separate, correctly-shaped table ending before \"continued note\", for a real Reading View <table> with 2 rows to match", () => {
+		const grids = tableGrids(BODY2);
+		const strict = grids.find((g) => g.rows.length === 2);
+		expect(strict?.rows[1]?.map((c) => c.text)).toEqual(['5', 'Note the delta', 'Goes in the inventory.']);
+	});
+
+	it('the lazily-absorbed candidate places "continued note" in its own padded row, for a Live Preview unfocused-cell render that included it', () => {
+		const grids = tableGrids(BODY2);
+		const lazy = grids.find((g) => g.rows.length === 3);
+		expect(lazy?.rows[2]?.map((c) => c.text)).toEqual(['continued note', '', '']);
 	});
 });

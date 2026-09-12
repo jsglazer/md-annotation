@@ -22,12 +22,29 @@ describe('tableRanges', () => {
 		expect(tableRanges(text)).toHaveLength(0);
 	});
 
-	it('stops a table at a row with no pipe, treating what follows as separate', () => {
+	// Verified against @lezer/markdown's GFM extension (what Obsidian's Live
+	// Preview editor is built on): it keeps absorbing a table through any
+	// non-blank, non-block-starting line — pipe or not — so this whole blob
+	// parses there as ONE table, not two. tableRanges feeds Live Preview's
+	// decoration-skip check, so it has to reflect that widest boundary: a
+	// decoration anywhere in this span would be swallowed by the one table
+	// widget Live Preview actually draws.
+	it('treats a pipe-less line as continuing the table, matching Live Preview', () => {
 		const text = ['| A |', '| - |', '| 1 |', 'no pipe here', '| B |', '| - |', '| 2 |'].join('\n');
-		const ranges = tableRanges(text);
-		expect(ranges).toHaveLength(2);
-		expect(text.slice(ranges[0]?.start, ranges[0]?.end)).toBe('| A |\n| - |\n| 1 |');
-		expect(text.slice(ranges[1]?.start, ranges[1]?.end)).toBe('| B |\n| - |\n| 2 |');
+		expect(overlapsAny(tableRanges(text), 0, text.length)).toBe(true);
+	});
+
+	// Verified against an actual note rendered in Obsidian (Reading View):
+	// the SAME text renders there as two separate tables, with the pipe-less
+	// line as its own ordinary paragraph in between — Reading View's renderer
+	// does not do GFM's lazy row continuation. tableGrids has to keep offering
+	// this narrower parse too, since it is what a real Reading View <table>'s
+	// shape will match.
+	it('also keeps the strict (pipe-required) parse, matching Reading View', () => {
+		const text = ['| A |', '| - |', '| 1 |', 'no pipe here', '| B |', '| - |', '| 2 |'].join('\n');
+		const grids = tableGrids(text);
+		const strictShapes = grids.filter((g) => g.rows.length === 2).map((g) => g.rows[0]?.[0]?.text);
+		expect(strictShapes).toEqual(['A', 'B']);
 	});
 
 	it('recognizes alignment markers in the delimiter row', () => {
@@ -91,6 +108,22 @@ describe('tableGrids', () => {
 	it('does not split on an escaped pipe', () => {
 		const grids = tableGrids(['| a | b |', '| - | - |', '| x \\| y | z |'].join('\n'));
 		expect(grids[0]?.rows[1]?.map((c) => c.text)).toEqual(['x \\| y', 'z']);
+	});
+
+	// GFM pads a short row's missing trailing cells as empty when rendering, so
+	// the lazily-absorbed candidate (what Live Preview's widget actually
+	// contains) has to match that shape — otherwise matchTableGrid's row-length
+	// comparison can never line it up with what is on screen there.
+	it('pads a lazily-absorbed row to the header column count', () => {
+		const grids = tableGrids(['| a | b | c |', '| - | - | - |', 'just one cell'].join('\n'));
+		const lazy = grids.find((g) => g.rows.length === 2);
+		expect(lazy?.rows[1]?.map((c) => c.text)).toEqual(['just one cell', '', '']);
+	});
+
+	// A table with nothing pipe-less immediately after it parses identically
+	// either way — only one candidate, not a spurious duplicate.
+	it('produces exactly one grid for a table nothing lazily continues', () => {
+		expect(tableGrids(TABLE)).toHaveLength(1);
 	});
 });
 

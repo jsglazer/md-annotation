@@ -1500,6 +1500,22 @@ function looksLikeTableRow(line) {
 function isDelimiterRow(line) {
   return line.includes("-") && DELIMITER_ROW.test(line);
 }
+var HEADING_LINE = /^ {0,3}#{1,6}(?:[ \t]|$)/;
+var THEMATIC_BREAK_LINE = /^ {0,3}(?:(?:-[ \t]*){3,}|(?:_[ \t]*){3,}|(?:\*[ \t]*){3,})$/;
+var BLOCKQUOTE_LINE = /^ {0,3}>/;
+var LIST_LINE = /^ {0,3}(?:[-+*](?:[ \t]|$)|\d{1,9}[.)](?:[ \t]|$))/;
+var FENCE_LINE = /^ {0,3}(?:`{3,}|~{3,})/;
+function continuesTableLazily(line) {
+  if (line.trim() === "") return false;
+  return !HEADING_LINE.test(line) && !THEMATIC_BREAK_LINE.test(line) && !BLOCKQUOTE_LINE.test(line) && !LIST_LINE.test(line) && !FENCE_LINE.test(line);
+}
+function normalizeRowLength(cells, columnCount, lineEnd) {
+  if (cells.length === columnCount) return cells;
+  if (cells.length > columnCount) return cells.slice(0, columnCount);
+  const padded = cells.slice();
+  while (padded.length < columnCount) padded.push({ text: "", start: lineEnd, end: lineEnd });
+  return padded;
+}
 function splitRow(line, lineStart) {
   var _a;
   const cells = [];
@@ -1528,8 +1544,8 @@ function splitRow(line, lineStart) {
   if (cells.length > 0 && (last == null ? void 0 : last.text) === "" && line.trimEnd().endsWith("|")) cells.pop();
   return cells;
 }
-function tableGrids(text) {
-  var _a, _b, _c;
+function parseTableGrids(text, continues, lazy) {
+  var _a, _b, _c, _d;
   const lines = text.split("\n");
   const lineStarts = [];
   let offset = 0;
@@ -1543,22 +1559,26 @@ function tableGrids(text) {
     const header = lines[i];
     const delimiter = lines[i + 1];
     if (header !== void 0 && delimiter !== void 0 && looksLikeTableRow(header) && isDelimiterRow(delimiter)) {
+      const columnCount = splitRow(header, (_a = lineStarts[i]) != null ? _a : 0).length;
       const rowLines = [i];
       let endLine = i + 1;
       let j = i + 2;
       while (j < lines.length) {
         const row = lines[j];
-        if (row === void 0 || row.trim() === "" || !looksLikeTableRow(row)) break;
+        if (row === void 0 || !continues(row)) break;
         rowLines.push(j);
         endLine = j;
         j++;
       }
       grids.push({
-        start: (_a = lineStarts[i]) != null ? _a : 0,
-        end: ((_b = lineStarts[endLine]) != null ? _b : 0) + ((_c = lines[endLine]) != null ? _c : "").length,
+        start: (_b = lineStarts[i]) != null ? _b : 0,
+        end: ((_c = lineStarts[endLine]) != null ? _c : 0) + ((_d = lines[endLine]) != null ? _d : "").length,
         rows: rowLines.map((ln) => {
           var _a2, _b2;
-          return splitRow((_a2 = lines[ln]) != null ? _a2 : "", (_b2 = lineStarts[ln]) != null ? _b2 : 0);
+          const lineText = (_a2 = lines[ln]) != null ? _a2 : "";
+          const lineStart = (_b2 = lineStarts[ln]) != null ? _b2 : 0;
+          const cells = splitRow(lineText, lineStart);
+          return lazy ? normalizeRowLength(cells, columnCount, lineStart + lineText.length) : cells;
         })
       });
       i = j;
@@ -1568,8 +1588,25 @@ function tableGrids(text) {
   }
   return grids;
 }
+function tableGrids(text) {
+  const strict = parseTableGrids(text, looksLikeTableRow, false);
+  const lazy = parseTableGrids(text, continuesTableLazily, true);
+  const lazyByStart = new Map(lazy.map((g) => [g.start, g]));
+  const grids = [];
+  for (const s of strict) {
+    grids.push(s);
+    const l = lazyByStart.get(s.start);
+    if (l && l.rows.length !== s.rows.length) grids.push(l);
+  }
+  return grids;
+}
 function tableRanges(text) {
-  return tableGrids(text).map((grid) => ({ start: grid.start, end: grid.end }));
+  const byStart = /* @__PURE__ */ new Map();
+  for (const grid of tableGrids(text)) {
+    const existing = byStart.get(grid.start);
+    if (!existing || grid.end > existing.end) byStart.set(grid.start, { start: grid.start, end: grid.end });
+  }
+  return [...byStart.values()];
 }
 function overlapsAny(ranges, from, to) {
   return ranges.some((r) => from < r.end && to > r.start);
