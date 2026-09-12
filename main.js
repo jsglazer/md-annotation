@@ -3962,10 +3962,19 @@ var SidebarConfirmModal = class extends import_obsidian5.Modal {
     const cancelBtn = buttonRow.createEl("button", { text: "Cancel" });
     cancelBtn.addEventListener("click", () => this.close());
     const confirmBtn = buttonRow.createEl("button", { text: "Delete", cls: "mod-warning" });
-    confirmBtn.addEventListener("click", () => {
+    const confirm = () => {
       this.onConfirm();
       this.close();
+    };
+    confirmBtn.addEventListener("click", confirm);
+    this.scope.register([], "Enter", (evt) => {
+      var _a;
+      if (((_a = activeDocument.activeElement) == null ? void 0 : _a.tagName) === "BUTTON") return true;
+      evt.preventDefault();
+      confirm();
+      return false;
     });
+    window.setTimeout(() => confirmBtn.focus(), 0);
   }
   onClose() {
     this.contentEl.empty();

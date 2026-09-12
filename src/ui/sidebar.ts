@@ -549,10 +549,21 @@ class SidebarConfirmModal extends Modal {
 		const cancelBtn = buttonRow.createEl('button', { text: 'Cancel' });
 		cancelBtn.addEventListener('click', () => this.close());
 		const confirmBtn = buttonRow.createEl('button', { text: 'Delete', cls: 'mod-warning' });
-		confirmBtn.addEventListener('click', () => {
+		const confirm = (): void => {
 			this.onConfirm();
 			this.close();
+		};
+		confirmBtn.addEventListener('click', confirm);
+		// Delete is the default: focused on open, and Enter confirms it.
+		// A focused button handles Enter natively (so Tab to Cancel, then
+		// Enter, still cancels); this only covers focus being elsewhere.
+		this.scope.register([], 'Enter', (evt) => {
+			if (activeDocument.activeElement?.tagName === 'BUTTON') return true;
+			evt.preventDefault();
+			confirm();
+			return false;
 		});
+		window.setTimeout(() => confirmBtn.focus(), 0);
 	}
 
 	onClose(): void {
