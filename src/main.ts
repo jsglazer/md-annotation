@@ -842,6 +842,7 @@ export default class MdAnnotationPlugin extends Plugin {
 				refreshedSelector: null,
 			});
 			this.decorateAllFor(path);
+			this.rerenderPreviewsForPath(path);
 		}
 		this.notifyChange();
 		if (type === 'comment') void this.activateSidebar();
@@ -927,6 +928,7 @@ export default class MdAnnotationPlugin extends Plugin {
 					});
 				}
 				this.decorateAllFor(path);
+				this.rerenderPreviewsForPath(path);
 			}
 			this.notifyChange();
 		}
@@ -1175,6 +1177,7 @@ export default class MdAnnotationPlugin extends Plugin {
 			removed = before - state.annotations.length;
 			for (const id of drop) state.outcomes.delete(id);
 			this.decorateAllFor(path);
+			this.rerenderPreviewsForPath(path);
 			this.notifyChange();
 		}
 		const tracked = this.orphanedIds.get(path);
@@ -1213,6 +1216,7 @@ export default class MdAnnotationPlugin extends Plugin {
 		const repaired = this.repairOrphans(state.body, state.annotations, state.outcomes, path);
 		if (repaired > 0) {
 			this.decorateAllFor(path);
+			this.rerenderPreviewsForPath(path);
 			this.notifyChange();
 		}
 		return repaired;
@@ -1248,6 +1252,7 @@ export default class MdAnnotationPlugin extends Plugin {
 				refreshedSelector: null,
 			});
 			this.decorateAllFor(path);
+			this.rerenderPreviewsForPath(path);
 			this.notifyChange();
 		}
 	}
@@ -1274,6 +1279,7 @@ export default class MdAnnotationPlugin extends Plugin {
 			state.annotations = state.annotations.filter((a) => a.id !== id);
 			state.outcomes.delete(id);
 			this.decorateAllFor(path);
+			this.rerenderPreviewsForPath(path);
 			this.notifyChange();
 		}
 	}

@@ -22,12 +22,46 @@ describe('tableRanges', () => {
 		expect(tableRanges(text)).toHaveLength(0);
 	});
 
-	it('stops a table at a row with no pipe, treating what follows as separate', () => {
+	// Matches GFM's lazy-continuation rule (verified against markdown-it): a
+	// table is only broken by a blank line or the start of another block-level
+	// element, so a pipe-less line of ordinary text is swallowed as one more
+	// (single-cell) row rather than ending the table — even a line that would
+	// otherwise look like the start of a second table, since nothing here
+	// interrupts a paragraph.
+	it('absorbs a pipe-less line as another row instead of ending the table', () => {
 		const text = ['| A |', '| - |', '| 1 |', 'no pipe here', '| B |', '| - |', '| 2 |'].join('\n');
+		const ranges = tableRanges(text);
+		expect(ranges).toHaveLength(1);
+		expect(text.slice(ranges[0]?.start, ranges[0]?.end)).toBe(text);
+		const grid = tableGrids(text)[0];
+		expect(grid?.rows.map((r) => r.map((c) => c.text))).toEqual([
+			['A'],
+			['1'],
+			['no pipe here'],
+			['B'],
+			['-'],
+			['2'],
+		]);
+	});
+
+	// A blank line (or a genuine block-starter like a heading) is what
+	// actually separates two tables — this is the real-world shape of "two
+	// tables in one note".
+	it('splits two tables that are actually separated by a blank line', () => {
+		const text = ['| A |', '| - |', '| 1 |', '', '| B |', '| - |', '| 2 |'].join('\n');
 		const ranges = tableRanges(text);
 		expect(ranges).toHaveLength(2);
 		expect(text.slice(ranges[0]?.start, ranges[0]?.end)).toBe('| A |\n| - |\n| 1 |');
 		expect(text.slice(ranges[1]?.start, ranges[1]?.end)).toBe('| B |\n| - |\n| 2 |');
+	});
+
+	// A heading (or list/blockquote/hr/fence) interrupts a table exactly as it
+	// interrupts a paragraph, even with no blank line before it.
+	it('stops a table at a line that starts a new block-level element', () => {
+		const text = ['| A |', '| - |', '| 1 |', '# Heading', 'more'].join('\n');
+		const ranges = tableRanges(text);
+		expect(ranges).toHaveLength(1);
+		expect(text.slice(ranges[0]?.start, ranges[0]?.end)).toBe('| A |\n| - |\n| 1 |');
 	});
 
 	it('recognizes alignment markers in the delimiter row', () => {
@@ -91,6 +125,15 @@ describe('tableGrids', () => {
 	it('does not split on an escaped pipe', () => {
 		const grids = tableGrids(['| a | b |', '| - | - |', '| x \\| y | z |'].join('\n'));
 		expect(grids[0]?.rows[1]?.map((c) => c.text)).toEqual(['x \\| y', 'z']);
+	});
+
+	// GFM pads a short row's missing trailing cells as empty when rendering, so
+	// a lazily-continued pipe-less row must match that shape — otherwise
+	// matchTableGrid's row-length comparison can never line it up with what is
+	// actually on screen.
+	it('pads a lazily-continued row to the header column count', () => {
+		const grids = tableGrids(['| a | b | c |', '| - | - | - |', 'just one cell'].join('\n'));
+		expect(grids[0]?.rows[1]?.map((c) => c.text)).toEqual(['just one cell', '', '']);
 	});
 });
 

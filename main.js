@@ -1500,6 +1500,22 @@ function looksLikeTableRow(line) {
 function isDelimiterRow(line) {
   return line.includes("-") && DELIMITER_ROW.test(line);
 }
+var HEADING_LINE = /^ {0,3}#{1,6}(?:[ \t]|$)/;
+var THEMATIC_BREAK_LINE = /^ {0,3}(?:(?:-[ \t]*){3,}|(?:_[ \t]*){3,}|(?:\*[ \t]*){3,})$/;
+var BLOCKQUOTE_LINE = /^ {0,3}>/;
+var LIST_LINE = /^ {0,3}(?:[-+*](?:[ \t]|$)|\d{1,9}[.)](?:[ \t]|$))/;
+var FENCE_LINE = /^ {0,3}(?:`{3,}|~{3,})/;
+function continuesTable(line) {
+  if (line.trim() === "") return false;
+  return !HEADING_LINE.test(line) && !THEMATIC_BREAK_LINE.test(line) && !BLOCKQUOTE_LINE.test(line) && !LIST_LINE.test(line) && !FENCE_LINE.test(line);
+}
+function normalizeRowLength(cells, columnCount, lineEnd) {
+  if (cells.length === columnCount) return cells;
+  if (cells.length > columnCount) return cells.slice(0, columnCount);
+  const padded = cells.slice();
+  while (padded.length < columnCount) padded.push({ text: "", start: lineEnd, end: lineEnd });
+  return padded;
+}
 function splitRow(line, lineStart) {
   var _a;
   const cells = [];
@@ -1529,7 +1545,7 @@ function splitRow(line, lineStart) {
   return cells;
 }
 function tableGrids(text) {
-  var _a, _b, _c;
+  var _a, _b, _c, _d;
   const lines = text.split("\n");
   const lineStarts = [];
   let offset = 0;
@@ -1543,22 +1559,29 @@ function tableGrids(text) {
     const header = lines[i];
     const delimiter = lines[i + 1];
     if (header !== void 0 && delimiter !== void 0 && looksLikeTableRow(header) && isDelimiterRow(delimiter)) {
+      const columnCount = splitRow(header, (_a = lineStarts[i]) != null ? _a : 0).length;
       const rowLines = [i];
       let endLine = i + 1;
       let j = i + 2;
       while (j < lines.length) {
         const row = lines[j];
-        if (row === void 0 || row.trim() === "" || !looksLikeTableRow(row)) break;
+        if (row === void 0 || !continuesTable(row)) break;
         rowLines.push(j);
         endLine = j;
         j++;
       }
       grids.push({
-        start: (_a = lineStarts[i]) != null ? _a : 0,
-        end: ((_b = lineStarts[endLine]) != null ? _b : 0) + ((_c = lines[endLine]) != null ? _c : "").length,
+        start: (_b = lineStarts[i]) != null ? _b : 0,
+        end: ((_c = lineStarts[endLine]) != null ? _c : 0) + ((_d = lines[endLine]) != null ? _d : "").length,
         rows: rowLines.map((ln) => {
           var _a2, _b2;
-          return splitRow((_a2 = lines[ln]) != null ? _a2 : "", (_b2 = lineStarts[ln]) != null ? _b2 : 0);
+          const lineText = (_a2 = lines[ln]) != null ? _a2 : "";
+          const lineStart = (_b2 = lineStarts[ln]) != null ? _b2 : 0;
+          return normalizeRowLength(
+            splitRow(lineText, lineStart),
+            columnCount,
+            lineStart + lineText.length
+          );
         })
       });
       i = j;
@@ -4510,6 +4533,7 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
         refreshedSelector: null
       });
       this.decorateAllFor(path);
+      this.rerenderPreviewsForPath(path);
     }
     this.notifyChange();
     if (type === "comment") void this.activateSidebar();
@@ -4588,6 +4612,7 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
           });
         }
         this.decorateAllFor(path);
+        this.rerenderPreviewsForPath(path);
       }
       this.notifyChange();
     }
@@ -4792,6 +4817,7 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
       removed = before - state.annotations.length;
       for (const id of drop) state.outcomes.delete(id);
       this.decorateAllFor(path);
+      this.rerenderPreviewsForPath(path);
       this.notifyChange();
     }
     const tracked = this.orphanedIds.get(path);
@@ -4825,6 +4851,7 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
     const repaired = this.repairOrphans(state.body, state.annotations, state.outcomes, path);
     if (repaired > 0) {
       this.decorateAllFor(path);
+      this.rerenderPreviewsForPath(path);
       this.notifyChange();
     }
     return repaired;
@@ -4860,6 +4887,7 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
         refreshedSelector: null
       });
       this.decorateAllFor(path);
+      this.rerenderPreviewsForPath(path);
       this.notifyChange();
     }
   }
@@ -4880,6 +4908,7 @@ var MdAnnotationPlugin = class extends import_obsidian6.Plugin {
       state.annotations = state.annotations.filter((a) => a.id !== id);
       state.outcomes.delete(id);
       this.decorateAllFor(path);
+      this.rerenderPreviewsForPath(path);
       this.notifyChange();
     }
   }
