@@ -15,8 +15,8 @@ updates:
       # Pinned to the plugin's minAppVersion; bumping it breaks `npm ci` (peer conflict).
       - dependency-name: obsidian
       # obsidian pins these as exact peers; bumping them breaks `npm ci` (ERESOLVE).
-      - dependency-name: '@codemirror/state
-@codemirror/view'
+      - dependency-name: '@codemirror/state'
+      - dependency-name: '@codemirror/view'
 
   - package-ecosystem: github-actions
     directory: '/'
